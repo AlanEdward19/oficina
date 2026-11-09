@@ -46,6 +46,8 @@ final class DockStore: ObservableObject {
     @Published var usage: UsageData?
     @Published var look = DockLook()
     @Published var nudged: String?
+    /// A casa da Faísca abre só quando ela está (ou está chegando) em casa.
+    @Published var homeOpen = true
     var openChat: () -> Void = {}
     var onOpen: (String) -> Void = { _ in }
     var onSwitch: (DockEnv) -> Void = { _ in }
@@ -387,7 +389,8 @@ private struct Glass: NSViewRepresentable {
     func updateNSView(_ v: NSVisualEffectView, context: Context) {}
 }
 
-let dockHomeID = "__faisca"
+/// Largura da casa: cabe o corpo dela inteiro.
+let dockHomeWidth: CGFloat = 76
 
 /// Espaço livre além da barra para o ícone ampliado e o nome do app.
 func dockHeadroom(_ look: DockLook) -> CGFloat {
@@ -611,10 +614,8 @@ struct DockView: View {
             // A casa da Faísca: ela mesma senta aqui quando está na Dock.
             if !vertical {
                 Color.clear
-                    .frame(width: 64, height: look.tile)
-                    .background(GeometryReader { g in
-                        Color.clear.preference(key: IconFrames.self, value: [dockHomeID: g.frame(in: .named("dock"))])
-                    })
+                    .frame(width: store.homeOpen ? dockHomeWidth : 0, height: look.tile)
+                    .animation(.easeInOut(duration: 0.25), value: store.homeOpen)
                     .accessibilityLabel("Casa da Faísca")
             }
         }
@@ -687,6 +688,9 @@ final class DockController {
     private let host: TrackingHost<DockView>
     private let edge: NSPanel
     private var shown = true
+    /// Para onde a Dock vai. Tudo que a Faísca consulta usa o destino, não o
+    /// quadro no meio de uma animação.
+    private var target = NSRect.zero
     private var outsideSince: Date?
     private var watch: Timer?
     private var frames: [String: CGRect] = [:]
@@ -765,7 +769,7 @@ final class DockController {
     /// Topo da barra (embaixo) e sua faixa horizontal, em coordenadas da tela.
     var shelf: (y: CGFloat, x: ClosedRange<CGFloat>)? {
         guard enabled, shown, store.look.edge == .bottom else { return nil }
-        let f = panel.frame
+        let f = target
         let barHeight = f.height - dockHeadroom(store.look)
         return (f.minY + barHeight, (f.minX + 14)...(f.maxX - 14))
     }
@@ -773,21 +777,22 @@ final class DockController {
     /// A Dock está à vista agora?
     var visible: Bool { enabled && shown }
 
-    /// Quadro da janela da Faísca sentada na casa, para um quadro da Dock.
-    /// Com a Dock recolhida, a casa fica fora da tela, junto com ela.
+    /// Quadro da Faísca sentada na casa, para um quadro da Dock. A casa é o
+    /// último item, antes da margem. Com a Dock recolhida, fica fora da tela.
     func petHome(for dock: NSRect) -> NSRect? {
-        guard enabled, store.look.edge == .bottom, let r = frames[dockHomeID] else { return nil }
-        return NSRect(x: dock.minX + r.midX - 42, y: dock.minY + 2, width: 84, height: 88)
+        guard enabled, store.look.edge == .bottom else { return nil }
+        let midX = dock.maxX - 12 - dockHomeWidth / 2
+        return NSRect(x: midX - 42, y: dock.minY + 2, width: 84, height: 88)
     }
 
-    var petHome: NSRect? { petHome(for: panel.frame) }
+    var petHome: NSRect? { petHome(for: target) }
 
-    var frame: NSRect { panel.frame }
+    var frame: NSRect { target }
 
     /// Centro do ícone em coordenadas da tela.
     func iconX(_ id: String) -> CGFloat? {
         guard enabled, shown, store.look.edge == .bottom, let r = frames[id] else { return nil }
-        return panel.frame.minX + r.midX
+        return target.minX + r.midX
     }
 
     private func apply() {
@@ -810,6 +815,7 @@ final class DockController {
         let s = screen.frame
         let gap: CGFloat = 6
         let target: NSRect
+        defer { self.target = target }
         switch store.look.edge {
         case .bottom:
             let y = shown ? s.minY + gap : s.minY - size.height - 2
@@ -830,6 +836,7 @@ final class DockController {
         } else {
             panel.setFrame(target, display: true)
         }
+        self.target = target
         onLayout(target, animated)
         if store.look.autohide && !shown {
             let strip: NSRect

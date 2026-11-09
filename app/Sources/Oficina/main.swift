@@ -102,6 +102,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pet.shelf = { [weak self] in self?.dock.shelf }
         pet.homeFrame = { [weak self] in self?.dock.petHome }
         pet.dockVisible = { [weak self] in self?.dock.visible ?? false }
+        pet.setHomeOpen = { [weak self] open in
+            if self?.dock.store.homeOpen != open { self?.dock.store.homeOpen = open }
+        }
         pet.dockFrame = { [weak self] in self?.dock.visible == true ? self?.dock.frame : nil }
         pet.iconX = { [weak self] id in self?.dock.iconX(id) }
         pet.randomIcon = { [weak self] in self?.dock.store.allIDs.randomElement() }

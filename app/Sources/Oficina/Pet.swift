@@ -246,17 +246,22 @@ final class PetFigure {
         }
     }
 
-    /// Passinhos enquanto anda.
-    func walking(_ on: Bool) {
-        if on {
-            let a = CAKeyframeAnimation(keyPath: "transform.translation.y")
-            a.values = [0, 3, 0]
-            a.duration = 0.28
-            a.repeatCount = .infinity
-            body.add(a, forKey: "step")
-        } else {
-            body.removeAnimation(forKey: "step")
-        }
+    /// Gingado enquanto anda: inclina de um lado para o outro a cada passo,
+    /// com um leve sobe e desce. Correndo, os passos ficam mais curtos.
+    func walking(_ on: Bool, fast: Bool = false) {
+        body.removeAnimation(forKey: "step")
+        guard on else { return }
+        let period: CFTimeInterval = fast ? 0.3 : 0.52
+        let tilt = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        tilt.values = [0, 0.09, 0, -0.09, 0]
+        let lift = CAKeyframeAnimation(keyPath: "transform.translation.y")
+        lift.values = [0, 2.5, 0, 2.5, 0]
+        let group = CAAnimationGroup()
+        group.animations = [tilt, lift]
+        group.duration = period
+        group.repeatCount = .infinity
+        group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        body.add(group, forKey: "step")
     }
 
     /// Rastejar: achata e estica enquanto sobe ou desce pela borda.
@@ -561,6 +566,8 @@ final class PetController {
     var onEvent: (String) -> Void = { _ in }
     /// Enquanto houver uma pergunta no balão, ela não sai andando.
     var busy: () -> Bool = { false }
+    /// Abre ou fecha a casa na Dock (os ícones abrem espaço para ela).
+    var setHomeOpen: (Bool) -> Void = { _ in }
 
     private(set) var home = false
     private var origin = NSPoint.zero
@@ -761,7 +768,8 @@ final class PetController {
             home = false
             settle(animated: animated)
         } else {
-            settle(animated: true)
+            // Em cima da faixa da Dock, ela sobe e desce junto, como num elevador.
+            settle(duration: animated ? 0.22 : 0)
         }
     }
 
@@ -785,9 +793,12 @@ final class PetController {
         outUntil = Date().addingTimeInterval(.random(in: 90...240))
         moving = true
         if dockVisible() {
+            // Pula para a esquerda, em cima da Dock; aí a casa fecha atrás dela.
             figure.look(-1)
-            place(NSPoint(x: start.minX, y: floorY(start.midX)), duration: 0.28) { [weak self] in
+            let x = start.midX - dockHomeWidth
+            place(NSPoint(x: x - size.width / 2, y: floorY(x)), duration: 0.3) { [weak self] in
                 self?.moving = false
+                self?.setHomeOpen(false)
                 done?()
             }
         } else {
@@ -797,43 +808,54 @@ final class PetController {
             place(NSPoint(x: start.minX, y: screen.minY), duration: 1.1) { [weak self] in
                 self?.figure.crawling(false)
                 self?.moving = false
+                self?.setHomeOpen(false)
                 done?()
             }
         }
     }
 
-    /// Volta para casa: anda até a Dock e senta, ou rasteja para baixo da borda.
+    /// Volta para casa: anda até o fim da Dock; aí a casa abre e ela entra.
+    /// Com a Dock recolhida, rasteja para baixo da borda.
     func goHome() {
-        guard !home, let target = homeFrame() else { return }
-        go(to: target.midX) { [weak self] in
-            guard let self, let target = self.homeFrame() else { return }
+        guard !home, let closed = homeFrame() else { return }
+        // Com a casa fechada, o fim da Dock fica um pouco à esquerda.
+        let doorway = closed.midX - dockHomeWidth
+        go(to: dockVisible() ? doorway : closed.midX) { [weak self] in
+            guard let self else { return }
             self.moving = true
             if self.dockVisible() {
-                self.place(target.origin, duration: 0.25, timing: .easeIn) {
-                    self.moving = false
-                    self.home = true
-                }
+                self.enterHome()
             } else {
                 self.figure.crawling(true)
                 self.place(NSPoint(x: self.origin.x, y: self.screen.minY - self.size.height + 4), duration: 0.9, timing: .easeIn) {
                     self.figure.crawling(false)
-                    self.place(target.origin, duration: 0)
-                    self.moving = false
+                    self.setHomeOpen(true)
                     self.home = true
+                    self.moving = false
+                    if let t = self.homeFrame() { self.place(t.origin, duration: 0) }
                 }
+            }
+        }
+    }
+
+    /// A casa abre (os ícones abrem espaço) e ela pula para dentro.
+    private func enterHome() {
+        moving = true
+        setHomeOpen(true)
+        // A Dock recalcula a largura no próximo ciclo; aí a casa tem lugar certo.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self, let target = self.homeFrame() else { return }
+            self.place(target.origin, duration: 0.3, timing: .easeInEaseOut) {
+                self.moving = false
+                self.home = true
             }
         }
     }
 
     /// Solta em cima da Dock: entra em casa. Fora dela: cai até o chão.
     private func dropped() {
-        if let dock = dockFrame(), dockVisible(), dock.contains(NSPoint(x: frame.midX, y: frame.minY + 20)),
-           let target = homeFrame() {
-            moving = true
-            place(target.origin, duration: 0.3, timing: .easeInEaseOut) { [weak self] in
-                self?.moving = false
-                self?.home = true
-            }
+        if let dock = dockFrame(), dockVisible(), dock.contains(NSPoint(x: frame.midX, y: frame.minY + 20)) {
+            enterHome()
             return
         }
         home = false
@@ -855,12 +877,15 @@ final class PetController {
 
     /// Cai (ou sobe) até o chão onde está.
     func settle(animated: Bool) {
+        let fall = origin.y - floorY(frame.midX)
+        settle(duration: animated ? min(0.5, max(0.15, Double(abs(fall)) / 1400)) : 0)
+    }
+
+    private func settle(duration: Double) {
         guard !home, !moving, NSEvent.pressedMouseButtons == 0 else { return }
         let y = floorY(frame.midX)
         guard abs(origin.y - y) > 0.5 else { return }
-        let fall = origin.y - y
-        let duration = animated ? min(0.5, max(0.15, Double(abs(fall)) / 1400)) : 0
-        place(NSPoint(x: origin.x, y: y), duration: duration, timing: fall > 0 ? .easeIn : .easeOut)
+        place(NSPoint(x: origin.x, y: y), duration: duration, timing: origin.y > y ? .easeIn : .easeOut)
     }
 
     /// Anda até um x, pulando para cima ou para baixo da Dock no caminho.
@@ -875,7 +900,7 @@ final class PetController {
         let dir: CGFloat = target > start ? 1 : -1
         figure.look(dir)
         moving = true
-        figure.walking(true)
+        figure.walking(true, fast: speed > 150)
         var stops: [CGFloat] = []
         if let s = shelf() {
             for edge in [s.x.lowerBound, s.x.upperBound] where (edge - start) * dir > 0 && (target - edge) * dir > 0 {
@@ -888,6 +913,8 @@ final class PetController {
             self?.moving = false
             self?.figure.walking(false)
             self?.figure.look(0)
+            // A Dock pode ter se mexido no caminho: acerta o chão.
+            self?.settle(animated: true)
             done?()
         }
     }
