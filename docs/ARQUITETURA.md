@@ -18,8 +18,8 @@ do Claude já lido.
 
 | | Disco | Memória | CPU parado |
 |---|---|---|---|
-| `oficinad` | 1,1 MB (54 crates) | 3,6 MB | 0,02% |
-| `Oficina.app` | 920 KB + core | 22 MB | 0,03% (sobe um pouco nos passeios) |
+| `oficinad` | 1,3 MB | 6,8 MB | 0,02% |
+| `Oficina.app` | 1,3 MB + core | 22 MB (58 MB com chat, Fábrica e Personalizar abertos) | 0,13% (0,7% com as três abertas) |
 | Vorssaint, para comparar | | 143 MB | não medido |
 
 O que segura esses números:
@@ -31,6 +31,22 @@ O que segura esses números:
 - A mente pensa a cada 1 s acordada e a cada 3 s dormindo ou com você longe.
 - Ícones da Dock são guardados como bitmaps do tamanho exibido; a tela da conversa só existe enquanto é usada.
 - Faísca e Dock animam por Core Animation; a janela da Dock nunca se move.
+
+## Escolha de modelo
+
+Agentes com modelo **Automático** (o padrão) rodam no modelo mais barato que dá conta, em `core/src/router.rs`:
+
+1. **Estimativa, sem tokens.** Regras (palavras-chave, tamanho, código) somadas a um modelo linear de 256 pesos
+   por degrau. Dá Haiku, Sonnet ou Opus; Fable só quando alguém escolhe.
+2. **Resultado manda.** Em missão, `falhou` ou `sem-evidencia` refaz a etapa um degrau acima, e a missão não volta
+   ao degrau que falhou. `bloqueado` e erros do processo não sobem: modelo maior não resolve falta de acesso ou limite.
+3. **Aprendizado.** Cada resultado ajusta só o degrau usado. "Não funcionou" na conversa conta como falha e sobe.
+4. **Verificar nunca fica abaixo de Sonnet:** uma aprovação errada não teria quem a detectasse depois.
+5. **Economia testada.** A cada 8 etapas só de leitura, uma tenta um degrau abaixo; é o único jeito de descobrir
+   que um modelo menor bastava.
+
+O cérebro em Automático vai no máximo até Sonnet, porque só conversa e delega. Agentes na nuvem usam o modelo
+padrão da nuvem, que o `--cloud` não deixa escolher.
 
 ## Contrato do core
 

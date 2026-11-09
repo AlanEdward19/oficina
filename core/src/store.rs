@@ -54,6 +54,9 @@ pub struct Task {
     /// Agente que responde esta tarefa.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Modelo que respondeu (mostrado no chat e usado para aprender).
+    #[serde(default)]
+    pub model: Option<String>,
     /// Conversa a que a tarefa pertence.
     #[serde(default)]
     pub conversation: Option<String>,
@@ -127,6 +130,7 @@ impl Store {
             target,
             machine,
             agent: None,
+            model: None,
             conversation,
             kind: None,
             prompt: None,

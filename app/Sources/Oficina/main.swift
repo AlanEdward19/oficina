@@ -276,6 +276,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let p = NSPanel(contentRect: NSRect(origin: .zero, size: size),
                         styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         p.title = title
+        p.titlebarAppearsTransparent = true
+        p.titleVisibility = .hidden
+        p.isMovableByWindowBackground = true
         p.isReleasedWhenClosed = false
         p.contentView = NSHostingView(rootView: view)
         p.center()
@@ -290,11 +293,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openPersonalize() {
-        openTool("personalizar", title: "Personalizar", size: NSSize(width: 440, height: 640), PersonalizeView(core: core))
+        openTool("personalizar", title: "Personalizar", size: NSSize(width: 540, height: 780), PersonalizeView(core: core))
     }
 
     @objc private func openFactory() {
-        openTool("fabrica", title: "Fábrica de agentes", size: NSSize(width: 620, height: 640), FactoryView(core: core) { [weak self] conv in
+        openTool("fabrica", title: "Fábrica de agentes", size: NSSize(width: 720, height: 720), FactoryView(core: core) { [weak self] conv in
             self?.core.select(conv)
             self?.openChat()
         })

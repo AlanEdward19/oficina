@@ -141,6 +141,20 @@ equal 'quatro etapas com veredito' 4 "$(api http://127.0.0.1:7901/v1/factory | p
 post "agents/$ana/missions" '{"goal":"sem-prova"}' >/dev/null
 for _ in $(seq 1 40); do [ "$(mission Ana status)" = falhou ] && break; sleep 0.1; done
 equal 'sem evidência não passa' falhou "$(mission Ana status)"
+# Modelo automático: o mais barato primeiro, sobe quando não dá conta.
+caio=$(post agents '{"name":"Caio","role":"Faz de tudo"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+equal 'modelo automático por padrão' auto "$(api http://127.0.0.1:7901/v1/factory | py '[a for a in d["agents"] if a["name"]=="Caio"][0]["model"]')"
+conv_caio=$(api http://127.0.0.1:7901/v1/factory | py '[a for a in d["agents"] if a["name"]=="Caio"][0]["conversation"]')
+id=$(send "{\"text\":\"resuma este texto\",\"conversation\":\"$conv_caio\"}"); wait_for "$id" done >/dev/null
+check 'pedido simples vai para o Haiku' '--model haiku' "$(grep -- '--append-system-prompt' "$tmp/args.log" | tail -1)"
+id=$(send "{\"text\":\"corrija o bug no login\",\"conversation\":\"$conv_caio\"}"); wait_for "$id" done >/dev/null
+check 'pedido de código vai para o Sonnet' '--model sonnet --effort medium' "$(grep -- '--append-system-prompt' "$tmp/args.log" | tail -1)"
+equal 'o chat mostra o modelo' sonnet "$(api "http://127.0.0.1:7901/v1/tasks/$id" | py 'd["model"]')"
+post "agents/$caio/missions" '{"goal":"sobe-modelo"}' >/dev/null
+for _ in $(seq 1 60); do [ "$(mission Caio status)" = aguardando ] && break; sleep 0.1; done
+equal 'etapa refeita um degrau acima' 'concluido' "$(api http://127.0.0.1:7901/v1/factory | py '[a for a in d["agents"] if a["name"]=="Caio"][0]["mission"]["log"][0]["verdict"]')"
+check 'falha no Haiku sobe para o Sonnet' 'sonnet' "$(grep -- 'sess-agente\|--append-system-prompt' "$tmp/args.log" | tail -2 | head -1)"
+equal 'subida anotada' 1 "$(api http://127.0.0.1:7901/v1/factory | py 'd["router"]["escalations"]')"
 check 'apagar agente' 204 "$(api -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:7901/v1/agents/$ana")"
 post settings '{"name":"Faísca"}' >/dev/null
 

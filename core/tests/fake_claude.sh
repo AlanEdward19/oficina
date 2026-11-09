@@ -31,6 +31,7 @@ if [[ "$*" == *--append-system-prompt* ]]; then
   echo '{"type":"system","subtype":"init","session_id":"sess-agente"}'
   case "$prompt" in
     *sem-prova*"Etapa: "*) body='VEREDITO: concluido' ;;
+    *sobe-modelo*"Etapa: Investigar"*) if [[ "$*" == *"--model haiku"* ]]; then body='VEREDITO: falhou'; else body='Feito.\nVEREDITO: concluido\nEVIDENCIA: a.rs:1'; fi ;;
     *"Etapa: "*) body='Feito.\nVEREDITO: concluido\nEVIDENCIA: arquivo.rs:1' ;;
     *"disse:"*) body='recebi do colega' ;;
     *chama-colega*) body='@Bia pode olhar isso?' ;;

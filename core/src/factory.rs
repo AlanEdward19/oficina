@@ -3,6 +3,7 @@
 //! playbooks do Waymark: etapas, aprovação humana e vereditos com evidência.
 
 use crate::engine::{Engine, STREAM_ARGS, claude_cmd};
+use crate::router::{self, AUTO, Need, OPUS};
 use crate::store::{Status, Target, Task};
 use crate::usage::now;
 use serde::{Deserialize, Serialize};
@@ -60,7 +61,7 @@ impl Settings {
             self.name = d.name;
         }
         self.personality = self.personality.trim().chars().take(600).collect();
-        if !MODELS.contains(&self.brain_model.as_str()) {
+        if self.brain_model != AUTO && !MODELS.contains(&self.brain_model.as_str()) {
             self.brain_model = d.brain_model;
         }
         if !self.brain_effort.is_empty() && !EFFORTS.contains(&self.brain_effort.as_str()) {
@@ -95,6 +96,11 @@ pub struct Mission {
     pub status: String,
     pub approved: bool,
     pub log: Vec<StageLog>,
+    /// Depois que um degrau falha, a missão não volta para ele.
+    #[serde(default)]
+    pub floor: u8,
+    #[serde(default)]
+    pub retrying: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -276,13 +282,17 @@ struct Stage {
     /// Só leitura: nada muda antes da aprovação.
     read_only: bool,
     approval: bool,
+    /// Quanto a etapa pesa na escolha do modelo.
+    bias: f32,
+    /// Quem confere não pode ser mais fraco que Sonnet: aprovar errado não dá para detectar depois.
+    floor: u8,
 }
 
 const STAGES: [Stage; 4] = [
-    Stage { name: "Investigar", instruction: "Investigue o objetivo no projeto. Não altere nada.", read_only: true, approval: false },
-    Stage { name: "Propor", instruction: "Proponha um plano curto e concreto para o objetivo. Não altere nada.", read_only: true, approval: false },
-    Stage { name: "Executar", instruction: "Execute o plano aprovado.", read_only: false, approval: true },
-    Stage { name: "Verificar", instruction: "Verifique se o objetivo foi cumprido, conferindo o resultado de verdade. Não altere nada.", read_only: true, approval: false },
+    Stage { name: "Investigar", instruction: "Investigue o objetivo no projeto. Não altere nada.", read_only: true, approval: false, bias: -0.5, floor: 0 },
+    Stage { name: "Propor", instruction: "Proponha um plano curto e concreto para o objetivo. Não altere nada.", read_only: true, approval: false, bias: 0.0, floor: 0 },
+    Stage { name: "Executar", instruction: "Execute o plano aprovado.", read_only: false, approval: true, bias: 1.0, floor: 0 },
+    Stage { name: "Verificar", instruction: "Verifique se o objetivo foi cumprido, conferindo o resultado de verdade. Não altere nada.", read_only: true, approval: false, bias: 0.0, floor: 1 },
 ];
 
 const VERDICT_RULE: &str = "Termine com uma linha `VEREDITO: concluido`, `VEREDITO: bloqueado` ou `VEREDITO: falhou`, \
@@ -343,11 +353,11 @@ const MAX_RELAYS: usize = 6;
 const READ_ONLY_TOOLS: [&str; 6] = ["Read", "Grep", "Glob", "Bash(ls *)", "Bash(git log *)", "Bash(git diff *)"];
 
 fn valid_model(m: &str) -> String {
-    if MODELS.contains(&m) { m.to_string() } else { "sonnet".to_string() }
+    if MODELS.contains(&m) { m.to_string() } else { AUTO.to_string() }
 }
 
 fn valid_effort(e: &str) -> String {
-    if EFFORTS.contains(&e) { e.to_string() } else { "medium".to_string() }
+    if EFFORTS.contains(&e) { e.to_string() } else { AUTO.to_string() }
 }
 
 impl Engine {
@@ -435,7 +445,7 @@ impl Engine {
     }
 
     /// Roda um turno do agente: no Mac por `--resume`, na nuvem por `--cloud`.
-    pub(crate) async fn run_agent(self: &Arc<Self>, task: &str, agent: &str, prompt: &str, read_only: bool) -> Option<String> {
+    pub(crate) async fn run_agent(self: &Arc<Self>, task: &str, agent: &str, prompt: &str, need: Need<'_>, read_only: bool) -> Option<String> {
         let Some(a) = self.factory.agent(agent) else {
             self.finish(task, Err("Esse agente não existe mais.".into()));
             return None;
@@ -452,10 +462,17 @@ impl Engine {
         let dir = a.project.clone().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| self.paths.workspace());
         let tools: Vec<String> = if read_only { READ_ONLY_TOOLS.map(String::from).to_vec() } else { self.cfg.allowed_tools.clone() };
         let role = format!("Você é o agente {}. Seu papel: {}", a.name, a.role);
+        let choice = (a.model == AUTO || a.effort == AUTO).then(|| self.router.choose(&a.id, need));
+        let model = choice.filter(|_| a.model == AUTO).map_or(a.model.as_str(), |c| c.model);
+        // Haiku responde bem sem ajuste de esforço; só os maiores recebem o nível.
+        let effort = if a.effort != AUTO { Some(a.effort.as_str()) } else { choice.map(|c| c.effort).filter(|_| model != "haiku") };
+        self.store.update(task, |t| t.model = Some(model.to_string()));
         let mut cmd = claude_cmd(&self.claude);
-        cmd.current_dir(dir)
-            .args(STREAM_ARGS)
-            .args(["--model", &a.model, "--effort", &a.effort, "--append-system-prompt", &role])
+        cmd.current_dir(dir).args(STREAM_ARGS).args(["--model", model]);
+        if let Some(effort) = effort {
+            cmd.args(["--effort", effort]);
+        }
+        cmd.args(["--append-system-prompt", &role])
             .args(["--permission-mode", if read_only { "dontAsk" } else { "acceptEdits" }, "--allowedTools"])
             .args(&tools);
         if let Some(s) = &a.session {
@@ -550,7 +567,7 @@ Só mencione alguém se precisar dele.\n\nMensagens recentes:\n{}\n\nAgora: {mes
                 team.name,
                 self.channel_log(&team.conversation, &task_id)
             );
-            let Some(reply) = self.run_agent(&task_id, &a.id, &prompt, false).await else { continue };
+            let Some(reply) = self.run_agent(&task_id, &a.id, &prompt, Need::plain(&message), false).await else { continue };
             for n in mentions(&reply, &names, Some(&a.name)) {
                 if relays < MAX_RELAYS {
                     relays += 1;
@@ -594,7 +611,7 @@ Só mencione alguém se precisar dele.\n\nMensagens recentes:\n{}\n\nAgora: {mes
             return Err(format!("{} já está numa missão.", a.name));
         }
         let updated = self.factory.update(agent, |x| {
-            x.mission = Some(Mission { goal: goal.to_string(), stage: 0, status: "rodando".into(), approved: false, log: Vec::new() });
+            x.mission = Some(Mission { goal: goal.to_string(), stage: 0, status: "rodando".into(), ..Default::default() });
         }).ok_or("Esse agente não existe.")?;
         let (me, id) = (self.clone(), agent.to_string());
         tokio::spawn(async move { me.advance_mission(&id).await });
@@ -633,17 +650,32 @@ Só mencione alguém se precisar dele.\n\nMensagens recentes:\n{}\n\nAgora: {mes
                 return;
             }
             let previous = m.log.iter().map(|l| format!("{}: {}", l.stage, l.verdict)).collect::<Vec<_>>().join("; ");
-            let prompt = format!("Missão: {}\nEtapa: {}. {}\nEtapas anteriores: {previous}\n\n{VERDICT_RULE}", m.goal, stage.name, stage.instruction);
-            let Some(reply) = self.run_agent(&task.id, agent, &prompt, stage.read_only).await else {
+            let retry = if m.retrying { "\nA tentativa anterior desta etapa não bastou. Refaça com mais cuidado." } else { "" };
+            let prompt = format!("Missão: {}\nEtapa: {}. {}{retry}\nEtapas anteriores: {previous}\n\n{VERDICT_RULE}", m.goal, stage.name, stage.instruction);
+            let need = Need { text: &m.goal, bias: stage.bias, floor: stage.floor.max(m.floor), ceiling: OPUS, probe: stage.read_only && stage.floor == 0, fresh: true };
+            let Some(reply) = self.run_agent(&task.id, agent, &prompt, need, stage.read_only).await else {
                 let cancelled = self.store.get(&task.id).is_some_and(|t| t.status == Status::Cancelled);
                 self.set_mission(agent, |m| m.status = if cancelled { "cancelada".into() } else { "falhou".into() });
                 return;
             };
             let (verdict, evidence) = parse_verdict(&reply);
             let done = verdict == "concluido";
+            let tier = (a.model == AUTO).then(|| self.store.get(&task.id).and_then(|t| t.model).and_then(|m| router::tier_of(&m))).flatten();
+            if let Some(tier) = tier.filter(|_| verdict != "bloqueado") {
+                self.router.outcome(&m.goal, tier, done);
+                // O modelo não deu conta: a mesma etapa, um degrau acima.
+                if !done && tier < OPUS {
+                    self.set_mission(agent, |m| {
+                        m.floor = tier + 1;
+                        m.retrying = true;
+                    });
+                    continue;
+                }
+            }
             let name = stage.name.to_string();
             self.set_mission(agent, |m| {
                 m.log.push(StageLog { stage: name, verdict: verdict.clone(), evidence });
+                m.retrying = false;
                 if done {
                     m.stage += 1;
                 } else {

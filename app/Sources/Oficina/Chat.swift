@@ -19,6 +19,7 @@ struct ChatView: View {
     @State private var newTitle = ""
     @State private var confirmDelete = false
     @State private var toast: String?
+    @State private var crew: [AgentItem] = []
     @FocusState private var focused: Bool
 
     private var thread: [TaskItem] { core.thread }
@@ -54,6 +55,7 @@ struct ChatView: View {
             core.loadConversations()
         }
         .onExitCommand(perform: close)
+        .task(id: conversation?.id) { await loadCrew() }
         .alert("Renomear conversa", isPresented: $renaming) {
             TextField("Título", text: $newTitle)
             Button("Salvar") { if let id = core.current { core.renameConversation(id, newTitle) } }
@@ -68,12 +70,56 @@ struct ChatView: View {
 
     // MARK: Cabeçalho
 
+    private var isCrewChat: Bool { conversation?.team != nil || conversation?.agent != nil }
+    private var working: Set<String> { Set(thread.filter(\.isActive).compactMap(\.agent)) }
+
+    /// Só canais e agentes precisam saber quem participa.
+    private func loadCrew() async {
+        guard let c = conversation, isCrewChat, let s = await core.loadFactory() else {
+            crew = []
+            return
+        }
+        crew = s.agents.filter { c.team != nil ? $0.team == c.team : $0.id == c.agent }
+    }
+
+    private var crewStrip: some View {
+        HStack(spacing: 8) {
+            ForEach(crew) { a in
+                let on = working.contains(a.id)
+                HStack(spacing: 5) {
+                    AgentAvatar(name: a.name, size: 20, active: on)
+                    Text(a.name).font(.caption.weight(.semibold))
+                }
+                .padding(.leading, 3)
+                .padding(.trailing, 8)
+                .padding(.vertical, 2)
+                .background(agentColor(a.name).opacity(on ? 0.3 : 0.14), in: Capsule())
+                .animation(.easeOut(duration: 0.25), value: on)
+            }
+        }
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
-            FaiscaAvatar(size: 28, mood: headerMood)
+            if let c = conversation, let team = c.team {
+                Image(systemName: "number")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
+                    .background(agentColor(c.title.replacingOccurrences(of: "# ", with: "")).gradient, in: RoundedRectangle(cornerRadius: 9))
+                    .id(team)
+            } else if let c = conversation, c.agent != nil {
+                AgentAvatar(name: c.title, size: 30, active: !working.isEmpty)
+            } else {
+                FaiscaAvatar(size: 28, mood: headerMood)
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(conversation?.title ?? "Nova conversa").font(.headline).lineLimit(1)
-                Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if conversation?.team != nil && !crew.isEmpty {
+                    crewStrip
+                } else {
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
             Spacer()
             Button(action: core.newConversation) {
@@ -106,6 +152,11 @@ struct ChatView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+        .background {
+            if isCrewChat {
+                AuroraView(colors: (crew.isEmpty ? [conversation?.title ?? ""] : crew.map(\.name)).prefix(3).map { NSColor(agentColor($0)).withAlphaComponent(0.55) })
+            }
+        }
     }
 
     private var headerMood: Mood {
@@ -136,7 +187,31 @@ struct ChatView: View {
 
     // MARK: Mensagens
 
-    private var emptyState: some View {
+    private var crewEmpty: some View {
+        VStack(spacing: 14) {
+            Spacer()
+            HStack(spacing: -10) {
+                ForEach(crew) { AgentAvatar(name: $0.name, size: 58) }
+            }
+            Text(conversation?.team != nil ? "Tudo pronto no canal" : "Fale com \(conversation?.title ?? "o agente")")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+            Text(conversation?.team != nil
+                 ? (crew.isEmpty ? "Coloque agentes nesta equipe pela Fábrica." : "Chame alguém com @Nome. Se ninguém for chamado, \(crew[0].name) responde.")
+                 : "Escreva o que precisa. O modelo é escolhido pelo tamanho da tarefa.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder private var emptyState: some View {
+        if isCrewChat { crewEmpty } else { assistantEmpty }
+    }
+
+    private var assistantEmpty: some View {
         VStack(spacing: 14) {
             Spacer()
             FaiscaAvatar(size: 64, mood: .idle)
@@ -200,6 +275,7 @@ struct ChatView: View {
                     .foregroundStyle(.orange)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if conversation?.team != nil && !crew.isEmpty { mentionChips }
             HStack(alignment: .bottom, spacing: 8) {
                 Menu {
                     Picker("Onde executar", selection: $target) {
@@ -250,6 +326,23 @@ struct ChatView: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(12)
+    }
+
+    private var mentionChips: some View {
+        HStack(spacing: 6) {
+            ForEach(crew) { a in
+                Button {
+                    draft += (draft.isEmpty || draft.hasSuffix(" ") ? "" : " ") + "@\(a.name) "
+                    focused = true
+                } label: {
+                    Text("@\(a.name)").font(.caption.weight(.semibold))
+                }
+                .buttonStyle(PillButton(tint: agentColor(a.name)))
+                .controlSize(.small)
+                .accessibilityLabel("Chamar \(a.name)")
+            }
+            Spacer()
+        }
     }
 
     private var canSend: Bool {
@@ -359,14 +452,26 @@ private struct ConversationList: View {
             core.select(c.id)
             picked()
         } label: {
-            Text(c.title)
-                .font(.callout)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(selected ? Color.accentColor.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
-                .contentShape(Rectangle())
+            HStack(spacing: 7) {
+                if c.team != nil {
+                    Image(systemName: "number")
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundStyle(.white)
+                        .frame(width: 18, height: 18)
+                        .background(agentColor(c.title.replacingOccurrences(of: "# ", with: "")).gradient, in: RoundedRectangle(cornerRadius: 5))
+                } else if c.agent != nil {
+                    AgentAvatar(name: c.title, size: 18)
+                }
+                Text(c.team != nil ? c.title.replacingOccurrences(of: "# ", with: "") : c.title)
+                    .font(.callout)
+                    .fontWeight(c.team != nil || c.agent != nil ? .medium : .regular)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(selected ? Color.accentColor.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -452,6 +557,8 @@ private struct Turn: View {
     let task: TaskItem
     @ObservedObject var core: Core
 
+    private var agentName: String? { task.agent.flatMap { core.agentNames[$0] } }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if !task.text.isEmpty { HStack {
@@ -460,17 +567,28 @@ private struct Turn: View {
                     .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(Color.accentColor.opacity(0.85), in: RoundedRectangle(cornerRadius: 14))
+                    .background(LinearGradient(colors: [Color.accentColor.opacity(0.75), Color.accentColor], startPoint: .top, endPoint: .bottom), in: RoundedRectangle(cornerRadius: 14))
                     .foregroundStyle(.white)
             } }
             HStack(alignment: .top, spacing: 8) {
-                FaiscaAvatar(size: 22, mood: avatarMood)
-                VStack(alignment: .leading, spacing: 8) {
-                    reply
+                if let agentName {
+                    AgentAvatar(name: agentName, size: 28, active: task.isActive)
+                    VStack(alignment: .leading, spacing: 8) { reply }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(agentColor(agentName).opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(agentColor(agentName).opacity(0.3)))
+                } else {
+                    FaiscaAvatar(size: 22, mood: avatarMood)
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let model = task.model, !task.isActive { ModelChip(model: model) }
+                        reply
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .popIn()
         .contextMenu {
             Button("Copiar pedido") { copy(task.text) }
             if !task.output.isEmpty { Button("Copiar resposta") { copy(task.output) } }
@@ -488,10 +606,12 @@ private struct Turn: View {
     }
 
     @ViewBuilder private var reply: some View {
-        if let id = task.agent, let name = core.agentNames[id] {
-            Label(name, systemImage: "person.crop.circle")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
+        if let name = agentName {
+            HStack(spacing: 6) {
+                Text(name).font(.system(size: 13, weight: .bold, design: .rounded)).foregroundStyle(agentColor(name))
+                if let model = task.model { ModelChip(model: model) }
+                if task.text.isEmpty { Label("chamado no canal", systemImage: "arrowshape.turn.up.right.fill").font(.caption2).foregroundStyle(.secondary) }
+            }
         } else if task.target != "auto" && task.target != "chat" && task.target != "agent" && task.target != "new_agent" {
             Label(task.target == "cloud" ? "Agente na nuvem" : task.target == "request" ? "Pedido de melhoria" : "Agente em \(task.machine ?? "este Mac")",
                   systemImage: task.target == "cloud" ? "cloud" : task.target == "request" ? "sparkles.rectangle.stack" : "desktopcomputer")
@@ -504,7 +624,7 @@ private struct Turn: View {
         switch task.status {
         case "queued", "running":
             HStack(spacing: 8) {
-                if task.output.isEmpty { TypingDots() }
+                if task.output.isEmpty { BouncingDots(color: agentName.map(agentColor) ?? .secondary).accessibilityLabel("Trabalhando") }
                 Text(runningLabel(task)).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Cancelar") { core.act(task.id, "cancel") }
@@ -578,23 +698,6 @@ private struct ApprovalCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.yellow.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.yellow.opacity(0.35)))
-    }
-}
-
-private struct TypingDots: View {
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.35)) { ctx in
-            let step = Int(ctx.date.timeIntervalSinceReferenceDate / 0.35) % 3
-            HStack(spacing: 3) {
-                ForEach(0..<3) { i in
-                    Circle()
-                        .fill(Color.secondary)
-                        .frame(width: 5, height: 5)
-                        .opacity(i == step ? 1 : 0.35)
-                }
-            }
-        }
-        .accessibilityLabel("Trabalhando")
     }
 }
 

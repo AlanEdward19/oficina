@@ -5,6 +5,7 @@ mod factory;
 mod mind;
 mod peer;
 mod route;
+mod router;
 mod store;
 mod usage;
 
@@ -251,7 +252,7 @@ async fn factory_state(State(app): State<App>) -> impl IntoResponse {
         v["status"] = e.agent_status(a).into();
         v
     }).collect();
-    Json(serde_json::json!({ "agents": agents, "teams": e.factory.teams() }))
+    Json(serde_json::json!({ "agents": agents, "teams": e.factory.teams(), "router": e.router.stats() }))
 }
 
 async fn agent_create(State(app): State<App>, Json(s): Json<factory::AgentSpec>) -> Response {

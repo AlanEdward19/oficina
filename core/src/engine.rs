@@ -2,6 +2,7 @@ use crate::{
     config::{Config, Paths, Peer},
     conv::Conversations,
     factory::{AgentSpec, Factory},
+    router::{AUTO, Need, Router},
     peer,
     mind::{Action, Initiative, Mind, decor, outfit},
     route::{self, CliEvent, Dest, Holdback},
@@ -35,7 +36,7 @@ Sem texto antes ou depois da linha. Conversa e perguntas simples você responde 
 Se o usuário pedir uma melhoria em você mesma ou na Oficina (funcionalidade nova, widget da Dock, roupinha, \
 casinha, ou um problema), responda SOMENTE com `@@delegar melhoria: <funcionalidade|widget|roupa|casa|bug>: \
 <descrição clara do pedido>`. Se o usuário pedir para criar um agente, responda SOMENTE com \
-`@@delegar criar-agente: <nome> | <papel> | <haiku|sonnet|opus|fable> | <low|medium|high|xhigh|max> | <mac|nuvem>`.";
+`@@delegar criar-agente: <nome> | <papel> | <auto|haiku|sonnet|opus|fable> | <auto|low|medium|high|xhigh|max> | <mac|nuvem>`. Use auto, salvo se o usuário pedir um modelo: a Oficina escolhe o mais barato que dá conta.";
 
 pub struct Engine {
     pub store: Arc<Store>,
@@ -47,6 +48,7 @@ pub struct Engine {
     pub(crate) brains: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub convs: Conversations,
     pub factory: Factory,
+    pub router: Router,
     local: Semaphore,
     running: Mutex<HashMap<String, i32>>,
     usage: Mutex<Usage>,
@@ -166,6 +168,7 @@ impl Engine {
         let mind = Arc::new(Mind::open(paths.home.join("mind.json"), store.tx.clone()));
         let convs = Conversations::open(paths.home.join("conversas.json"));
         let factory = Factory::open(paths.home.join("fabrica.json"));
+        let router = Router::open(paths.home.join("router.json"));
         // Tarefas de antes das conversas vão para uma conversa própria.
         if let Some(first) = store.has_orphans() {
             let c = convs.create(Some("Conversas anteriores"), Some(first));
@@ -181,6 +184,7 @@ impl Engine {
             brains: Default::default(),
             convs,
             factory,
+            router,
             local,
             running: Default::default(),
             usage: Default::default(),
@@ -221,7 +225,7 @@ impl Engine {
         }
         let (me, id) = (self.clone(), task.id.clone());
         if let Some(a) = agent {
-            tokio::spawn(async move { me.run_agent(&id, &a, &text, false).await });
+            tokio::spawn(async move { me.run_agent(&id, &a, &text, Need::plain(&text), false).await });
             return Ok(task);
         }
         if let Some(t) = team.and_then(|t| self.factory.team(&t)) {
@@ -487,10 +491,11 @@ impl Engine {
 
     /// Uma pergunta avulsa ao Claude, sem ferramentas e sem conversa.
     async fn ask(&self, prompt: &str) -> Result<String, String> {
+        let brain = self.factory.settings().brain_model;
         let mut cmd = claude_cmd(&self.claude);
         cmd.current_dir(self.paths.brain_dir())
             .args(STREAM_ARGS)
-            .args(["--model", &self.factory.settings().brain_model, "--tools", "", "--setting-sources", "", "--no-session-persistence"])
+            .args(["--model", if brain == AUTO { "haiku" } else { &brain }, "--tools", "", "--setting-sources", "", "--no-session-persistence"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -534,10 +539,13 @@ impl Engine {
         } else {
             format!("{base}{memory}")
         };
+        // O cérebro só conversa e delega: quem executa é o agente, então Opus aqui seria desperdício.
+        let model = if me.brain_model == AUTO { self.router.choose(&conv, Need { ceiling: 1, ..Need::plain(text) }).model } else { me.brain_model.as_str() };
+        self.store.update(id, |t| t.model = Some(model.to_string()));
         let mut cmd = claude_cmd(&self.claude);
         cmd.current_dir(self.paths.brain_dir())
             .args(STREAM_ARGS)
-            .args(["--model", &me.brain_model, "--tools", "", "--setting-sources", ""])
+            .args(["--model", model, "--tools", "", "--setting-sources", ""])
             .args(["--system-prompt", &system]);
         if !me.brain_effort.is_empty() {
             cmd.args(["--effort", &me.brain_effort]);
@@ -580,7 +588,7 @@ impl Engine {
                         t.agent = Some(a.id.clone());
                         t.status = Status::Queued;
                     });
-                    self.run_agent(id, &a.id, &prompt, false).await;
+                    self.run_agent(id, &a.id, &prompt, Need::plain(&prompt), false).await;
                 }
                 None => self.finish(id, Err(format!("Não encontrei o agente {name} na fábrica."))),
             },

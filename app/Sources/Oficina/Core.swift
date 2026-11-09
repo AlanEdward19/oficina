@@ -7,6 +7,7 @@ struct TaskItem: Identifiable, Decodable, Equatable {
     var machine: String?
     var conversation: String?
     var agent: String?
+    var model: String?
     var kind: String?
     var prompt: String?
     var status: String
@@ -16,7 +17,7 @@ struct TaskItem: Identifiable, Decodable, Equatable {
     let createdAt: UInt64
 
     enum CodingKeys: String, CodingKey {
-        case id, text, target, machine, conversation, agent, kind, prompt, status, output, url, error
+        case id, text, target, machine, conversation, agent, model, kind, prompt, status, output, url, error
         case createdAt = "created_at"
     }
 
