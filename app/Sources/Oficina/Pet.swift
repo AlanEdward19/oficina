@@ -366,6 +366,57 @@ final class PetFigure {
         zzz = group
     }
 
+    enum Pose { case out, home, bed }
+    private(set) var pose: Pose = .out
+    /// Tamanho em casa, para caber na Dock (definido pelo tamanho dos ícones).
+    var homeScale: CGFloat = 0.7
+
+    /// Fora, tamanho normal. Em casa, menor. Na cama, menor e deitada.
+    /// A escala parte da base dela, então os pés continuam no chão.
+    func setPose(_ p: Pose, duration: Double) {
+        pose = p
+        let s: CGFloat = p == .out ? 1 : homeScale
+        let sx = p == .bed ? s * 1.1 : s
+        let sy = p == .bed ? s * 0.86 : s
+        var t = CATransform3DMakeTranslation(w / 2, 0, 0)
+        t = CATransform3DScale(t, sx, sy, 1)
+        t = CATransform3DTranslate(t, -w / 2, 0, 0)
+        CATransaction.begin()
+        if duration > 0 {
+            CATransaction.setAnimationDuration(duration)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
+        } else {
+            CATransaction.setDisableActions(true)
+        }
+        root.sublayerTransform = t
+        CATransaction.commit()
+    }
+
+    /// Como um cachorrinho antes de dormir: vira de um lado e do outro,
+    /// amassa a caminha e só então se deita.
+    func curlUp(then done: @escaping () -> Void) {
+        let turn = CAKeyframeAnimation(keyPath: "transform.scale.x")
+        turn.values = [1, 0.15, -1, -1, 0.15, 1, 1]
+        turn.keyTimes = [0, 0.12, 0.24, 0.4, 0.52, 0.64, 1]
+        let knead = CAKeyframeAnimation(keyPath: "transform.translation.y")
+        knead.values = [0, 0, 0, -2.5, 0, -2.5, 0, -2.5, 0]
+        knead.keyTimes = [0, 0.64, 0.68, 0.73, 0.78, 0.83, 0.88, 0.93, 1]
+        let sway = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        sway.values = [0, 0.08, -0.08, 0.06, -0.06, 0, 0]
+        sway.keyTimes = [0, 0.1, 0.3, 0.45, 0.6, 0.66, 1]
+        let group = CAAnimationGroup()
+        group.animations = [turn, knead, sway]
+        group.duration = 2.2
+        group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { MainActor.assumeIsolated { done() } }
+        body.add(group, forKey: "curl")
+        CATransaction.commit()
+        look(-1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.look(1) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak self] in self?.look(0) }
+    }
+
     /// Giro de comemoração.
     func spin() {
         let a = CABasicAnimation(keyPath: "transform.rotation.z")
@@ -665,6 +716,8 @@ final class PetController {
     private var restUntil = Date.distantPast
     private var restTimer: Timer?
     var resting: Bool { Date() < restUntil }
+    /// Tamanho dela em casa, conforme o tamanho dos ícones da Dock.
+    var homeScale: () -> CGFloat = { 0.7 }
     var onMoveEnd: () -> Void = {}
     private var lastSaid = Date.distantPast
 
@@ -724,6 +777,9 @@ final class PetController {
             guard let self else { return }
             self.interrupt()
             self.home = false
+            self.restTimer?.invalidate()
+            self.restUntil = .distantPast
+            self.figure.setPose(.out, duration: 0.15)
             self.onEvent("pet_drag")
         }
         view.onDrag = { [weak self] p in self?.follow(p) }
@@ -852,7 +908,13 @@ final class PetController {
 
     private func refresh() {
         guard Date() >= celebrateUntil else { return }
-        set(taskMood ?? (resting ? .sleeping : mindMood))
+        let mood = taskMood ?? (resting ? .sleeping : mindMood)
+        set(mood)
+        // Em casa: deitada se dorme, sentadinha se não.
+        if home {
+            let pose: PetFigure.Pose = mood == .sleeping ? .bed : .home
+            if figure.pose != pose { figure.setPose(pose, duration: 0.35) }
+        }
     }
 
     // MARK: Descanso
@@ -862,7 +924,15 @@ final class PetController {
         let secs = Double.random(in: 600...900)
         restUntil = Date().addingTimeInterval(secs)
         figure.hush()
-        refresh()
+        // Ainda acordada durante o ritual; depois deita e dorme.
+        celebrateUntil = Date().addingTimeInterval(2.3)
+        set(.idle)
+        figure.curlUp { [weak self] in
+            guard let self, self.resting, self.home else { return }
+            self.figure.setPose(.bed, duration: 0.35)
+            self.celebrateUntil = .distantPast
+            self.refresh()
+        }
         onRest(secs)
         restTimer?.invalidate()
         let t = Timer(timeInterval: secs, repeats: false) { [weak self] _ in
@@ -878,6 +948,7 @@ final class PetController {
         guard restUntil > .distantPast else { return }
         restTimer?.invalidate()
         restUntil = .distantPast
+        if home { figure.setPose(.home, duration: 0.3) }
         refresh()
         onWake()
     }
@@ -920,6 +991,8 @@ final class PetController {
             return
         }
         home = true
+        figure.homeScale = homeScale()
+        figure.setPose(.home, duration: 0)
         place(target.origin, duration: 0)
     }
 
@@ -932,6 +1005,9 @@ final class PetController {
         home = false
         outUntil = Date().addingTimeInterval(.random(in: 90...240))
         moving = true
+        restTimer?.invalidate()
+        restUntil = .distantPast
+        figure.setPose(.out, duration: dockVisible() ? 0.3 : 0)
         if dockVisible() {
             // Pula para a esquerda, em cima da Dock; aí a casa fecha atrás dela.
             figure.look(-1)
@@ -977,6 +1053,8 @@ final class PetController {
                 self.place(NSPoint(x: self.origin.x, y: self.screen.minY - self.size.height + 4), duration: 0.9, timing: .easeIn) {
                     self.figure.crawling(false)
                     self.setHomeOpen(true)
+                    self.figure.homeScale = self.homeScale()
+                    self.figure.setPose(.home, duration: 0)
                     self.home = true
                     self.moving = false
                     if let t = self.homeFrame() { self.place(t.origin, duration: 0) }
@@ -1011,6 +1089,8 @@ final class PetController {
         // A Dock recalcula a largura no próximo ciclo; aí a casa tem lugar certo.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self, let target = self.homeFrame() else { return }
+            self.figure.homeScale = self.homeScale()
+            self.figure.setPose(.home, duration: 0.3)
             self.place(target.origin, duration: 0.3, timing: .easeInEaseOut) {
                 self.moving = false
                 self.home = true

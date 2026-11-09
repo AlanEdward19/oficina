@@ -390,7 +390,7 @@ private struct Glass: NSViewRepresentable {
 }
 
 /// Largura da casa: cabe o corpo dela inteiro.
-let dockHomeWidth: CGFloat = 76
+let dockHomeWidth: CGFloat = 60
 
 /// Espaço livre além da barra para o ícone ampliado e o nome do app.
 func dockHeadroom(_ look: DockLook) -> CGFloat {
@@ -782,7 +782,7 @@ final class DockController {
     func petHome(for dock: NSRect) -> NSRect? {
         guard enabled, store.look.edge == .bottom else { return nil }
         let midX = dock.maxX - 12 - dockHomeWidth / 2
-        return NSRect(x: midX - 42, y: dock.minY + 2, width: 84, height: 88)
+        return NSRect(x: midX - 42, y: dock.minY + 4, width: 84, height: 88)
     }
 
     var petHome: NSRect? { petHome(for: target) }

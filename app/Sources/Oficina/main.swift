@@ -106,6 +106,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func wirePetToDock() {
         pet.shelf = { [weak self] in self?.dock.shelf }
+        pet.homeScale = { [weak self] in
+            let tile = self?.dock.store.look.tile ?? 48
+            return min(0.9, max(0.5, (tile + 4) / 74))
+        }
         pet.homeFrame = { [weak self] in self?.dock.petHome }
         pet.dockVisible = { [weak self] in self?.dock.visible ?? false }
         pet.setHomeOpen = { [weak self] open in
