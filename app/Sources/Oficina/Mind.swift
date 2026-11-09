@@ -149,8 +149,6 @@ final class BubbleController {
     private let panel: NSPanel
     private let host: TrackingHost<BubbleView>
     private weak var anchor: NSWindow?
-    private var hideWork: DispatchWorkItem?
-    private var lastThoughtShown = Date.distantPast
 
     init(anchor: NSWindow) {
         self.anchor = anchor
@@ -168,29 +166,25 @@ final class BubbleController {
     }
 
     func ask(_ initiative: InitiativeData?) {
-        hideWork?.cancel()
         model.initiative = initiative
-        if initiative == nil, model.text == nil {
+        if initiative == nil {
             panel.orderOut(nil)
-        } else {
+        } else if !moving {
             show()
         }
     }
 
-    /// Pensamento em voz alta: só de vez em quando, para não incomodar.
-    func say(_ text: String, force: Bool = false) {
-        guard model.initiative == nil else { return }
-        guard force || Date().timeIntervalSince(lastThoughtShown) > 90 else { return }
-        lastThoughtShown = Date()
-        model.text = text
-        show()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.model.initiative == nil else { return }
-            self.model.text = nil
-            self.panel.orderOut(nil)
-        }
-        hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+    private var moving = false
+
+    /// Enquanto a Faísca anda, a pergunta some; volta quando ela para.
+    func hideForMove() {
+        moving = true
+        panel.orderOut(nil)
+    }
+
+    func showAfterMove() {
+        moving = false
+        if model.initiative != nil { show() }
     }
 
     private func show() {

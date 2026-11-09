@@ -109,10 +109,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pet.iconX = { [weak self] id in self?.dock.iconX(id) }
         pet.randomIcon = { [weak self] in self?.dock.store.allIDs.randomElement() }
         pet.nudge = { [weak self] id in self?.dock.store.nudge(id) }
-        dock.onLayout = { [weak self] target, animated in
+        dock.onLayout = { [weak self] target, duration, curve in
             guard let self else { return }
-            self.pet.dockMoved(home: self.dock.petHome(for: target), animated: animated)
+            self.pet.dockMoved(home: self.dock.petHome(for: target), duration: duration, curve: curve)
         }
+        pet.onMoveStart = { [weak self] in self?.bubble.hideForMove() }
+        pet.onMoveEnd = { [weak self] in self?.bubble.showAfterMove() }
         dock.store.onOpen = { [weak self] id in
             self?.core.mindEvents([["kind": "dock_open", "bundle": id]])
             self?.pet.appOpened(id)
@@ -173,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, !brief.sleeping, brief.mood != "focada" {
             let important = t.text.hasPrefix("Olha minha") || t.text.hasPrefix("Anotado") || t.text.hasPrefix("Modo ")
-            if !pet.hiddenAtHome { bubble.say(t.text, force: important) }
+            pet.say(t.text, force: important)
         }
     }
 
@@ -187,9 +189,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "chat":
                 openChat()
             case "outfit":
-                bubble.say("Já volto com a roupa nova!", force: true)
+                pet.say("Já volto com a roupa nova!", force: true)
             case "task":
-                bubble.say("Mandei um agente pesquisar. Te aviso.", force: true)
+                pet.say("Mandei um agente pesquisar. Te aviso.", force: true)
             default:
                 break
             }

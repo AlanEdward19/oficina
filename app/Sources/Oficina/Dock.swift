@@ -695,8 +695,8 @@ final class DockController {
     private var watch: Timer?
     private var frames: [String: CGRect] = [:]
     private var bag = Set<AnyCancellable>()
-    /// Avisa para onde a Dock vai (já com o quadro final) e se anima.
-    var onLayout: (NSRect, Bool) -> Void = { _, _ in }
+    /// Avisa para onde a Dock vai (quadro final), em quanto tempo e com que curva.
+    var onLayout: (NSRect, Double, CAMediaTimingFunction?) -> Void = { _, _, _ in }
 
     var enabled: Bool {
         get { UserDefaults.standard.object(forKey: "dockEnabled") as? Bool ?? true }
@@ -802,11 +802,16 @@ final class DockController {
         } else {
             panel.orderOut(nil)
             edge.orderOut(nil)
-            onLayout(panel.frame, false)
+            onLayout(panel.frame, 0, nil)
         }
     }
 
     private var screen: NSScreen { NSScreen.screens.first ?? NSScreen.main! }
+
+    private var slideToken = 0
+    /// Subida suave, quase sem freio no fim; descida que acelera.
+    private let showCurve = CAMediaTimingFunction(controlPoints: 0.16, 0.9, 0.3, 1)
+    private let hideCurve = CAMediaTimingFunction(controlPoints: 0.5, 0, 0.8, 0.4)
 
     private func layout(animated: Bool) {
         guard enabled else { return }
@@ -814,30 +819,57 @@ final class DockController {
         let size = host.fittingSize
         let s = screen.frame
         let gap: CGFloat = 6
-        let target: NSRect
-        defer { self.target = target }
+        let shownFrame: NSRect
+        let hiddenFrame: NSRect
         switch store.look.edge {
         case .bottom:
-            let y = shown ? s.minY + gap : s.minY - size.height - 2
-            target = NSRect(x: s.midX - size.width / 2, y: y, width: size.width, height: size.height)
+            shownFrame = NSRect(x: s.midX - size.width / 2, y: s.minY + gap, width: size.width, height: size.height)
+            hiddenFrame = shownFrame.offsetBy(dx: 0, dy: -(size.height + gap + 2))
         case .left:
-            let x = shown ? s.minX + gap : s.minX - size.width - 2
-            target = NSRect(x: x, y: s.midY - size.height / 2, width: size.width, height: size.height)
+            shownFrame = NSRect(x: s.minX + gap, y: s.midY - size.height / 2, width: size.width, height: size.height)
+            hiddenFrame = shownFrame.offsetBy(dx: -(size.width + gap + 2), dy: 0)
         case .right:
-            let x = shown ? s.maxX - size.width - gap : s.maxX + 2
-            target = NSRect(x: x, y: s.midY - size.height / 2, width: size.width, height: size.height)
+            shownFrame = NSRect(x: s.maxX - size.width - gap, y: s.midY - size.height / 2, width: size.width, height: size.height)
+            hiddenFrame = shownFrame.offsetBy(dx: size.width + gap + 2, dy: 0)
         }
-        if animated {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.22
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                panel.animator().setFrame(target, display: true)
+        let target = shown ? shownFrame : hiddenFrame
+        self.target = target
+        slideToken += 1
+        let token = slideToken
+        let layer = host.layer
+        // Se outra animação estava no meio, continua de onde está.
+        let current = (layer?.presentation()?.value(forKeyPath: "transform.translation") as? NSValue)?.sizeValue
+        layer?.removeAnimation(forKey: "slide")
+
+        let wasAway = panel.frame.origin != shownFrame.origin && current == nil
+        if animated && (shown || !wasAway) {
+            // A janela fica parada na posição visível e o conteúdo desliza
+            // por Core Animation, no servidor de janelas.
+            let away = CGSize(width: hiddenFrame.minX - shownFrame.minX, height: hiddenFrame.minY - shownFrame.minY)
+            let from = current ?? (shown ? away : .zero)
+            panel.setFrame(shownFrame, display: true)
+            let anim = CABasicAnimation(keyPath: "transform.translation")
+            anim.fromValue = NSValue(size: from)
+            anim.toValue = NSValue(size: shown ? .zero : away)
+            anim.duration = shown ? 0.32 : 0.24
+            anim.timingFunction = shown ? showCurve : hideCurve
+            anim.fillMode = .forwards
+            anim.isRemovedOnCompletion = false
+            CATransaction.begin()
+            CATransaction.setCompletionBlock { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.slideToken == token else { return }
+                    if !self.shown { self.panel.setFrame(hiddenFrame, display: false) }
+                    self.host.layer?.removeAnimation(forKey: "slide")
+                }
             }
+            layer?.add(anim, forKey: "slide")
+            CATransaction.commit()
+            onLayout(target, anim.duration, anim.timingFunction)
         } else {
             panel.setFrame(target, display: true)
+            onLayout(target, 0, nil)
         }
-        self.target = target
-        onLayout(target, animated)
         if store.look.autohide && !shown {
             let strip: NSRect
             switch store.look.edge {
@@ -849,6 +881,11 @@ final class DockController {
             edge.orderFrontRegardless()
         } else {
             edge.orderOut(nil)
+        }
+        // À mostra com ocultação ligada, sempre há quem confira se o mouse saiu,
+        // venha a Dock de onde vier.
+        if store.look.autohide && shown && !(watch?.isValid ?? false) {
+            startWatching()
         }
     }
 
@@ -867,7 +904,6 @@ final class DockController {
         guard store.look.autohide, !shown else { return }
         shown = true
         layout(animated: true)
-        startWatching()
     }
 
     /// Enquanto a Dock está revelada, verifica de vez em quando se o mouse

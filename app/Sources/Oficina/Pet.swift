@@ -277,6 +277,57 @@ final class PetFigure {
         }
     }
 
+    private var thought: CALayer?
+
+    /// Pensamento em voz alta, preso acima dela: anda junto quando ela anda.
+    /// `left` e `right` limitam o balão à tela, em coordenadas dela.
+    func say(_ text: String, left: CGFloat, right: CGFloat) {
+        thought?.removeFromSuperlayer()
+        let font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        let attr = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor.white])
+        let r = attr.boundingRect(with: NSSize(width: 200, height: 300), options: [.usesLineFragmentOrigin, .usesFontLeading])
+        let size = CGSize(width: ceil(r.width) + 22, height: ceil(r.height) + 14)
+        var x = w / 2 - size.width / 2
+        x = min(max(x, left + 6), right - size.width - 6)
+        let box = CALayer()
+        box.frame = CGRect(x: x, y: 90, width: size.width, height: size.height)
+        box.cornerRadius = 11
+        box.backgroundColor = CGColor(gray: 0.13, alpha: 0.94)
+        box.borderColor = CGColor(gray: 1, alpha: 0.14)
+        box.borderWidth = 1
+        box.shadowOpacity = 0.3
+        box.shadowRadius = 6
+        box.shadowOffset = CGSize(width: 0, height: -2)
+        let label = CATextLayer()
+        label.frame = box.bounds.insetBy(dx: 11, dy: 7)
+        label.string = attr
+        label.isWrapped = true
+        box.addSublayer(label)
+        box.opacity = 0
+        root.addSublayer(box)
+        crispen(box)
+        thought = box
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        fade.duration = 0.2
+        box.add(fade, forKey: "in")
+        box.opacity = 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak box] in
+            guard let box, self?.thought === box else { return }
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.3)
+            CATransaction.setCompletionBlock { box.removeFromSuperlayer() }
+            box.opacity = 0
+            CATransaction.commit()
+        }
+    }
+
+    func hush() {
+        thought?.removeFromSuperlayer()
+        thought = nil
+    }
+
     /// Giro de comemoração.
     func spin() {
         let a = CABasicAnimation(keyPath: "transform.rotation.z")
@@ -568,6 +619,17 @@ final class PetController {
     var busy: () -> Bool = { false }
     /// Abre ou fecha a casa na Dock (os ícones abrem espaço para ela).
     var setHomeOpen: (Bool) -> Void = { _ in }
+    var onMoveStart: () -> Void = {}
+    var onMoveEnd: () -> Void = {}
+    private var lastSaid = Date.distantPast
+
+    /// Pensamento em voz alta, de vez em quando. Escondida em casa, fica quieta.
+    func say(_ text: String, force: Bool = false) {
+        guard !hiddenAtHome, !busy() else { return }
+        guard force || Date().timeIntervalSince(lastSaid) > 90 else { return }
+        lastSaid = Date()
+        figure.say(text, left: screen.minX - origin.x, right: screen.maxX - origin.x)
+    }
 
     private(set) var home = false
     private var origin = NSPoint.zero
@@ -648,15 +710,17 @@ final class PetController {
 
     /// Leva o desenho até `p` (canto inferior esquerdo, em coordenadas da
     /// tela). A janela de toque some durante o trajeto e aparece no destino.
-    private func place(_ p: NSPoint, duration: Double, timing: CAMediaTimingFunctionName = .easeOut, done: (() -> Void)? = nil) {
+    private func place(_ p: NSPoint, duration: Double, timing: CAMediaTimingFunctionName = .easeOut,
+                       curve: CAMediaTimingFunction? = nil, done: (() -> Void)? = nil) {
         origin = p
         let local = CGPoint(x: p.x - stage.frame.minX, y: p.y - stage.frame.minY)
         let mine = token
         CATransaction.begin()
         if duration > 0 {
             CATransaction.setAnimationDuration(duration)
-            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: timing))
+            CATransaction.setAnimationTimingFunction(curve ?? CAMediaTimingFunction(name: timing))
             window.orderOut(nil)
+            onMoveStart()
         } else {
             CATransaction.setDisableActions(true)
         }
@@ -666,6 +730,7 @@ final class PetController {
                 self.window.setFrameOrigin(p)
                 self.window.orderFrontRegardless()
                 done?()
+                if !self.moving { self.onMoveEnd() }
             }
         }
         figure.root.position = local
@@ -759,17 +824,20 @@ final class PetController {
     var hiddenAtHome: Bool { home && !dockVisible() }
 
     /// A Dock se mexeu: em casa, ela acompanha; fora, só ajusta o chão.
-    func dockMoved(home target: NSRect?, animated: Bool) {
+    func dockMoved(home target: NSRect?, duration: Double, curve: CAMediaTimingFunction?) {
         guard !moving, NSEvent.pressedMouseButtons == 0 else { return }
         if home, let target {
-            place(target.origin, duration: animated ? 0.22 : 0)
+            // Indo para fora da tela com a Dock: o pensamento vai junto, calado.
+            if target.maxY <= screen.minY + 10 { figure.hush() }
+            // Mesma duração e curva da Dock: sobem e descem juntas.
+            place(target.origin, duration: duration, curve: curve)
         } else if home {
             // Sem casa (Dock desligada ou de lado): ela fica na tela.
             home = false
-            settle(animated: animated)
+            settle(animated: duration > 0)
         } else {
             // Em cima da faixa da Dock, ela sobe e desce junto, como num elevador.
-            settle(duration: animated ? 0.22 : 0)
+            settle(duration: duration, curve: curve)
         }
     }
 
@@ -797,9 +865,13 @@ final class PetController {
             figure.look(-1)
             let x = start.midX - dockHomeWidth
             place(NSPoint(x: x - size.width / 2, y: floorY(x)), duration: 0.3) { [weak self] in
-                self?.moving = false
                 self?.setHomeOpen(false)
-                done?()
+                // A Dock encolhe e os ícones mudam de lugar: espera antes de mirar.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    self?.moving = false
+                    self?.settle(animated: true)
+                    done?()
+                }
             }
         } else {
             // Começa logo abaixo da borda, onde a Dock estaria, e sobe.
@@ -807,9 +879,11 @@ final class PetController {
             figure.crawling(true)
             place(NSPoint(x: start.minX, y: screen.minY), duration: 1.1) { [weak self] in
                 self?.figure.crawling(false)
-                self?.moving = false
                 self?.setHomeOpen(false)
-                done?()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    self?.moving = false
+                    done?()
+                }
             }
         }
     }
@@ -827,6 +901,7 @@ final class PetController {
                 self.enterHome()
             } else {
                 self.figure.crawling(true)
+                self.figure.hush()
                 self.place(NSPoint(x: self.origin.x, y: self.screen.minY - self.size.height + 4), duration: 0.9, timing: .easeIn) {
                     self.figure.crawling(false)
                     self.setHomeOpen(true)
@@ -881,11 +956,11 @@ final class PetController {
         settle(duration: animated ? min(0.5, max(0.15, Double(abs(fall)) / 1400)) : 0)
     }
 
-    private func settle(duration: Double) {
+    private func settle(duration: Double, curve: CAMediaTimingFunction? = nil) {
         guard !home, !moving, NSEvent.pressedMouseButtons == 0 else { return }
         let y = floorY(frame.midX)
         guard abs(origin.y - y) > 0.5 else { return }
-        place(NSPoint(x: origin.x, y: y), duration: duration, timing: origin.y > y ? .easeIn : .easeOut)
+        place(NSPoint(x: origin.x, y: y), duration: duration, timing: origin.y > y ? .easeIn : .easeOut, curve: curve)
     }
 
     /// Anda até um x, pulando para cima ou para baixo da Dock no caminho.
@@ -945,15 +1020,28 @@ final class PetController {
     /// Alguém abriu um app pela Dock: ela sai, corre até o ícone e volta.
     func appOpened(_ id: String) {
         guard figure.mood != .sleeping, dockVisible(), iconX(id) != nil, !busy() else { return }
-        let visit = { [weak self] in
-            guard let self, let x = self.iconX(id) else { return }
-            self.go(to: x, speed: 320) {
+        let visit: () -> Void = { [weak self] in
+            self?.reach(id, speed: 320) {
+                guard let self else { return }
                 self.nudge(id)
                 self.celebrate(.happy, seconds: 1.2)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.goHome() }
             }
         }
         if home { comeOut(then: visit) } else { visit() }
+    }
+
+    /// Vai até o ícone e, se a Dock mudou no caminho, corrige a mira.
+    private func reach(_ id: String, speed: CGFloat = 90, tries: Int = 2, then done: @escaping () -> Void) {
+        guard let x = iconX(id) else { return }
+        go(to: x, speed: speed) { [weak self] in
+            guard let self else { return }
+            if tries > 0, let now = self.iconX(id), abs(now - self.frame.midX) > 3 {
+                self.reach(id, speed: 160, tries: tries - 1, then: done)
+            } else {
+                done()
+            }
+        }
     }
 
     /// Troca de ambiente: um giro de alegria, onde estiver.
@@ -992,8 +1080,8 @@ final class PetController {
     }
 
     private func stroll(restless: Bool) {
-        if dockVisible(), restless || Bool.random(), let id = randomIcon(), let x = iconX(id) {
-            go(to: x) { [weak self] in
+        if dockVisible(), restless || Bool.random(), let id = randomIcon(), iconX(id) != nil {
+            reach(id) { [weak self] in
                 self?.nudge(id)
                 self?.onEvent("pet_visit")
             }
