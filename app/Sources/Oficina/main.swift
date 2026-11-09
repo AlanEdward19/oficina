@@ -4,21 +4,24 @@ import Combine
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let core = Core()
     private var pet: PetController!
     private var notch: NotchController!
     private var dock: DockController!
     private var bubble: BubbleController!
     private var mindPanel: NSPanel?
-    private var toolPanels: [String: NSPanel] = [:]
+    private var toolWindows: [String: NSWindow] = [:]
     private var presenceTimer: Timer?
     private var usageTimer: Timer?
     private var panel: KeyPanel!
     private var status: NSStatusItem!
+    private var popover: NSPopover?
     private var bag = Set<AnyCancellable>()
     private var lastStatus: [String: String] = [:]
     private var hotKey: EventHotKeyRef?
+    private var clipKey: EventHotKeyRef?
+    let tools = Tools()
 
     func applicationDidFinishLaunching(_ note: Notification) {
         if CommandLine.arguments.contains("--testar-dock-sistema") {
@@ -52,6 +55,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildPanel()
         buildStatusItem()
         registerHotKey()
+        tools.restoreOnLaunch()
+        tools.onToast = { [weak self] in self?.pet.say($0) }
 
         lastStatus = [:]
         core.$tasks
@@ -95,6 +100,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         core.start()
         if CommandLine.arguments.contains("--abrir-mente") { openMind() }
         if CommandLine.arguments.contains("--abrir-fabrica") { openFactory() }
+        if CommandLine.arguments.contains("--abrir-limpeza") { openCleaner() }
+        if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--abrir-barra") }) {
+            if let tab = arg.split(separator: "=").dropFirst().first { tools.tab = String(tab) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showBarPanel() }
+        }
         if CommandLine.arguments.contains("--abrir-personalizar") { openPersonalize() }
         if CommandLine.arguments.contains("--dormir") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
@@ -104,10 +114,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--visitar-dock") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 guard let self, let id = self.dock.store.allIDs.dropFirst().first else { return }
-                self.pet.appOpened(id)
+                self.pet.visit(id)
             }
         }
         if CommandLine.arguments.contains("--abrir-notch") { notch.setExpanded(true) }
+        // Só para teste visual: abre uma conversa específica.
+        if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--conversa=") }) { core.select(String(arg.dropFirst(11))) }
         if CommandLine.arguments.contains("--abrir-conversa") { togglePanel() }
     }
 
@@ -266,41 +278,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.makeKeyAndOrderFront(nil)
     }
 
-    /// Janela de ferramenta: existe só enquanto está aberta.
-    private func openTool<V: View>(_ key: String, title: String, size: NSSize, _ view: V) {
-        if let p = toolPanels[key] {
-            NSApp.activate(ignoringOtherApps: true)
-            p.makeKeyAndOrderFront(nil)
+    /// Janela comum do macOS: existe só enquanto está aberta.
+    private func openTool<V: View>(_ key: String, size: NSSize, toolbar: Bool = true, _ view: V) {
+        NSApp.activate(ignoringOtherApps: true)
+        if let w = toolWindows[key] {
+            w.makeKeyAndOrderFront(nil)
             return
         }
-        let p = NSPanel(contentRect: NSRect(origin: .zero, size: size),
-                        styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
-        p.title = title
-        p.titlebarAppearsTransparent = true
-        p.titleVisibility = .hidden
-        p.isMovableByWindowBackground = true
-        p.isReleasedWhenClosed = false
-        p.contentView = NSHostingView(rootView: view)
-        p.center()
-        toolPanels[key] = p
-        // Sem foco automático: senão o formulário rola e corta o topo.
-        DispatchQueue.main.async { p.makeFirstResponder(nil) }
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: p, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.toolPanels[key] = nil }
+        let host = NSHostingController(rootView: view)
+        host.sceneBridgingOptions = [.toolbars, .title]
+        let w = NSWindow(contentViewController: host)
+        w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        if toolbar {
+            w.styleMask.insert(.fullSizeContentView)
+            w.toolbarStyle = .unified
+            w.toolbar = NSToolbar()
         }
-        NSApp.activate(ignoringOtherApps: true)
-        p.makeKeyAndOrderFront(nil)
+        w.isReleasedWhenClosed = false
+        w.setContentSize(size)
+        w.center()
+        toolWindows[key] = w
+        // Sem foco automático: senão o formulário rola e corta o topo.
+        DispatchQueue.main.async { w.makeFirstResponder(nil) }
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.toolWindows[key] = nil }
+        }
+        w.makeKeyAndOrderFront(nil)
     }
 
     @objc private func openPersonalize() {
-        openTool("personalizar", title: "Personalizar", size: NSSize(width: 540, height: 780), PersonalizeView(core: core))
+        openTool("personalizar", size: NSSize(width: 500, height: 760), toolbar: false, PersonalizeView(core: core))
     }
 
     @objc private func openFactory() {
-        openTool("fabrica", title: "Fábrica de agentes", size: NSSize(width: 720, height: 720), FactoryView(core: core) { [weak self] conv in
+        openTool("fabrica", size: NSSize(width: 820, height: 580), FactoryView(core: core) { [weak self] conv in
             self?.core.select(conv)
             self?.openChat()
         })
+    }
+
+    @objc private func openCleaner() {
+        openTool("limpeza", size: NSSize(width: 860, height: 600), CleanView(core: core))
+    }
+
+    @objc private func openTools() { showBarPanel() }
+
+    func openClipboard() {
+        tools.tab = "clipboard"
+        showBarPanel()
     }
 
     @objc private func suggestNow() { core.suggest() }
@@ -453,8 +478,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildStatusItem() {
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         status.button?.image = NSImage(systemSymbolName: "sparkle", accessibilityDescription: "Oficina")
-        status.menu = makeMenu()
+        status.button?.target = self
+        status.button?.action = #selector(statusClicked)
+        status.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
+
+    /// Clique abre o painel; botão direito abre o menu, como nos itens do sistema.
+    @objc private func statusClicked() {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            status.menu = makeMenu()
+            status.button?.performClick(nil)
+            status.menu = nil
+        } else if popover != nil {
+            popover?.performClose(nil)
+        } else {
+            showBarPanel()
+        }
+    }
+
+    /// O painel só existe enquanto está aberto.
+    private func showBarPanel() {
+        guard popover == nil, let button = status.button else { return }
+        let p = NSPopover()
+        p.behavior = .transient
+        p.delegate = self
+        p.contentViewController = NSHostingController(rootView: MenuBarPanel(tools: tools, openCleaner: { [weak self] in self?.openCleaner() }, close: { [weak self] in self?.popover?.performClose(nil) }))
+        popover = p
+        NSApp.activate(ignoringOtherApps: true)
+        p.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        p.contentViewController?.view.window?.makeKey()
+    }
+
+    func popoverDidClose(_ notification: Notification) { popover = nil }
 
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
@@ -471,6 +527,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let factory = NSMenuItem(title: "Fábrica de agentes…", action: #selector(openFactory), keyEquivalent: "")
         factory.target = self
         menu.addItem(factory)
+        let cleaner = NSMenuItem(title: "Limpeza do Disco…", action: #selector(openCleaner), keyEquivalent: "")
+        cleaner.target = self
+        menu.addItem(cleaner)
+        let utilities = NSMenuItem(title: "Painel da barra de menus", action: #selector(openTools), keyEquivalent: "")
+        utilities.target = self
+        menu.addItem(utilities)
         let personalize = NSMenuItem(title: "Personalizar…", action: #selector(openPersonalize), keyEquivalent: "")
         personalize.target = self
         menu.addItem(personalize)
@@ -492,7 +554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dockMenu.addItem(replace)
         dockMenu.addItem(.separator())
         for (i, env) in dock.store.envs.enumerated() {
-            let item = NSMenuItem(title: env.name, action: #selector(pickEnvironment(_:)), keyEquivalent: i < 9 ? "\(i + 1)" : "")
+            let item = NSMenuItem(title: env.title, action: #selector(pickEnvironment(_:)), keyEquivalent: i < 9 ? "\(i + 1)" : "")
             item.keyEquivalentModifierMask = [.control, .option]
             item.target = self
             item.tag = i
@@ -520,10 +582,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = title
         alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancelar")
+        alert.addButton(withTitle: tr("Cancelar"))
         let field = NSTextField(string: initial)
         field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
-        field.placeholderString = "Nome do ambiente"
+        field.placeholderString = title
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -548,7 +610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let id = Int(key.id)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if id == 1 { d.togglePanel() } else if id >= 11 { d.dock.store.switchTo(id - 11) }
+                    if id == 1 { d.togglePanel() } else if let s = Snap(rawValue: UInt32(id)) { d.tools.snap(s) } else if id == 9 { d.openClipboard() } else if id >= 11 { d.dock.store.switchTo(id - 11) }
                 }
             }
             return noErr
@@ -556,6 +618,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let signature = OSType(0x4F46_4943)
         RegisterEventHotKey(UInt32(kVK_Space), UInt32(controlKey | optionKey),
                             EventHotKeyID(signature: signature, id: 1), GetApplicationEventTarget(), 0, &hotKey)
+        RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(controlKey | optionKey),
+                            EventHotKeyID(signature: signature, id: 9), GetApplicationEventTarget(), 0, &clipKey)
         // ⌃⌥1…9 trocam de ambiente da Dock.
         let digits = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
         for (i, code) in digits.enumerated() {

@@ -59,3 +59,7 @@ cd core && cargo build --release && bash tests/e2e.sh
 O `e2e.sh` sobe dois daemons reais e usa um `claude` falso, sem consumir a assinatura.
 
 Dados, configuração e token ficam em `~/Library/Application Support/Oficina`.
+
+## Licença
+
+[MIT](LICENSE)

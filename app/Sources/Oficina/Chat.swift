@@ -4,10 +4,10 @@ final class KeyPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-private let suggestions: [(icon: String, text: String)] = [
-    ("sparkles", "O que você consegue fazer por mim?"),
-    ("desktopcomputer", "/pc Crie notas.md com ideias para um painel de cozinha"),
-    ("cloud", "/nuvem Pesquise placas ESP32 com tela touch para um painel de cozinha"),
+private let suggestions = [
+    "O que você consegue fazer por mim?",
+    "/pc Crie notas.md com ideias para um painel de cozinha",
+    "/nuvem Pesquise placas ESP32 com tela touch",
 ]
 
 struct ChatView: View {
@@ -29,16 +29,21 @@ struct ChatView: View {
         HStack(spacing: 0) {
             ConversationList(core: core) { focused = true }
                 .frame(width: 216)
-            Divider().opacity(0.5)
+            Divider()
             VStack(spacing: 0) {
                 header
-                Divider().opacity(0.5)
-                if thread.isEmpty { emptyState } else { messages }
+                Divider()
+                if thread.isEmpty {
+                    emptyState.frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    messages
+                }
                 composer
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
         .frame(width: 700, height: 580)
-        .background(.regularMaterial)
         .overlay(alignment: .top) {
             if let toast {
                 Text(toast)
@@ -82,44 +87,28 @@ struct ChatView: View {
         crew = s.agents.filter { c.team != nil ? $0.team == c.team : $0.id == c.agent }
     }
 
-    private var crewStrip: some View {
-        HStack(spacing: 8) {
-            ForEach(crew) { a in
-                let on = working.contains(a.id)
-                HStack(spacing: 5) {
-                    AgentAvatar(name: a.name, size: 20, active: on)
-                    Text(a.name).font(.caption.weight(.semibold))
-                }
-                .padding(.leading, 3)
-                .padding(.trailing, 8)
-                .padding(.vertical, 2)
-                .background(agentColor(a.name).opacity(on ? 0.3 : 0.14), in: Capsule())
-                .animation(.easeOut(duration: 0.25), value: on)
-            }
-        }
+    /// Título sem o "# " dos canais: o ícone já diz que é canal.
+    private var plainTitle: String? { conversation?.title.replacingOccurrences(of: "# ", with: "") }
+
+    private var crewLine: String {
+        crew.map { working.contains($0.id) ? "\($0.name) (trabalhando)" : $0.name }.joined(separator: ", ")
     }
 
     private var header: some View {
         HStack(spacing: 10) {
-            if let c = conversation, let team = c.team {
-                Image(systemName: "number")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 30, height: 30)
-                    .background(agentColor(c.title.replacingOccurrences(of: "# ", with: "")).gradient, in: RoundedRectangle(cornerRadius: 9))
-                    .id(team)
+            if conversation?.team != nil {
+                Image(systemName: "number").font(.title3).foregroundStyle(.secondary).frame(width: 28, height: 28)
             } else if let c = conversation, c.agent != nil {
-                AgentAvatar(name: c.title, size: 30, active: !working.isEmpty)
+                AgentAvatar(name: c.title, size: 28)
             } else {
                 FaiscaAvatar(size: 28, mood: headerMood)
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text(conversation?.title ?? "Nova conversa").font(.headline).lineLimit(1)
-                if conversation?.team != nil && !crew.isEmpty {
-                    crewStrip
-                } else {
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
+                Text(plainTitle ?? "Nova Conversa").font(.headline).lineLimit(1)
+                Text(conversation?.team != nil && !crew.isEmpty ? crewLine : conversation?.agent != nil ? (crew.first?.role ?? subtitle) : subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer()
             Button(action: core.newConversation) {
@@ -152,11 +141,6 @@ struct ChatView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background {
-            if isCrewChat {
-                AuroraView(colors: (crew.isEmpty ? [conversation?.title ?? ""] : crew.map(\.name)).prefix(3).map { NSColor(agentColor($0)).withAlphaComponent(0.55) })
-            }
-        }
     }
 
     private var headerMood: Mood {
@@ -188,23 +172,14 @@ struct ChatView: View {
     // MARK: Mensagens
 
     private var crewEmpty: some View {
-        VStack(spacing: 14) {
-            Spacer()
-            HStack(spacing: -10) {
-                ForEach(crew) { AgentAvatar(name: $0.name, size: 58) }
-            }
-            Text(conversation?.team != nil ? "Tudo pronto no canal" : "Fale com \(conversation?.title ?? "o agente")")
-                .font(.system(size: 20, weight: .bold, design: .rounded))
+        ContentUnavailableView {
+            Label(conversation?.team != nil ? "Canal Vazio" : "Fale com \(conversation?.title ?? "o agente")",
+                  systemImage: conversation?.team != nil ? "number" : "person.crop.circle")
+        } description: {
             Text(conversation?.team != nil
                  ? (crew.isEmpty ? "Coloque agentes nesta equipe pela Fábrica." : "Chame alguém com @Nome. Se ninguém for chamado, \(crew[0].name) responde.")
                  : "Escreva o que precisa. O modelo é escolhido pelo tamanho da tarefa.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
-            Spacer()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder private var emptyState: some View {
@@ -212,37 +187,26 @@ struct ChatView: View {
     }
 
     private var assistantEmpty: some View {
-        VStack(spacing: 14) {
-            Spacer()
-            FaiscaAvatar(size: 64, mood: .idle)
-            Text("Oi! Sou \(core.settings.name).").font(.title3.weight(.semibold))
+        ContentUnavailableView {
+            Label {
+                Text("Oi! Sou \(core.settings.name).")
+            } icon: {
+                FaiscaAvatar(size: 48, mood: .idle)
+            }
+        } description: {
             Text("Converso, abro agentes na nuvem e trabalho neste Mac quando você deixar.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
+        } actions: {
             VStack(spacing: 6) {
-                ForEach(suggestions, id: \.text) { s in
+                ForEach(suggestions, id: \.self) { s in
                     Button {
-                        draft = s.text
+                        draft = s
                         focused = true
                     } label: {
-                        Label(s.text, systemImage: s.icon)
-                            .font(.callout)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                        Text(s).lineLimit(1).frame(maxWidth: 380)
                     }
-                    .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 6)
-            Spacer()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var messages: some View {
@@ -293,7 +257,7 @@ struct ChatView: View {
                 .help("Onde executar: \(targetName)")
                 .accessibilityLabel("Onde executar: \(targetName)")
 
-                TextField("Mensagem para \(conversation?.agent != nil || conversation?.team != nil ? (conversation?.title ?? "") : core.settings.name)…", text: $draft, axis: .vertical)
+                TextField("Mensagem para \(isCrewChat ? (plainTitle ?? "") : core.settings.name)…", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...8)
                     .focused($focused)
@@ -319,8 +283,9 @@ struct ChatView: View {
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.vertical, 6)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(nsColor: .separatorColor)))
             Text("Return envia · ⌥Return quebra linha · ⌘N nova conversa · /nuvem e /pc escolhem o destino")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -335,9 +300,8 @@ struct ChatView: View {
                     draft += (draft.isEmpty || draft.hasSuffix(" ") ? "" : " ") + "@\(a.name) "
                     focused = true
                 } label: {
-                    Text("@\(a.name)").font(.caption.weight(.semibold))
+                    Text("@\(a.name)")
                 }
-                .buttonStyle(PillButton(tint: agentColor(a.name)))
                 .controlSize(.small)
                 .accessibilityLabel("Chamar \(a.name)")
             }
@@ -394,90 +358,57 @@ private struct ConversationList: View {
         return ["Hoje", "Ontem", "Últimos 7 dias", "Mais antigas"].compactMap { k in out[k].map { (k, $0) } }
     }
 
+    private var selection: Binding<String?> {
+        Binding(get: { core.current }, set: { id in
+            guard let id else { return }
+            core.select(id)
+            picked()
+        })
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Conversas").font(.headline)
-                Spacer()
-                Button(action: core.newConversation) {
-                    Image(systemName: "square.and.pencil")
-                }
-                .buttonStyle(.borderless)
-                .help("Nova conversa")
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 52)
-            Divider().opacity(0.5)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    section("Equipes", core.conversations.filter { $0.team != nil })
-                    section("Agentes", core.conversations.filter { $0.agent != nil })
-                    if core.conversations.isEmpty {
-                        Text("Suas conversas aparecem aqui.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(10)
-                    }
-                    ForEach(groups, id: \.0) { title, items in
-                        Text(title)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 10)
-                            .padding(.top, 10)
-                            .padding(.bottom, 2)
-                        ForEach(items) { c in row(c) }
-                    }
-                }
-                .padding(6)
+        List(selection: selection) {
+            section("Equipes", core.conversations.filter { $0.team != nil })
+            section("Agentes", core.conversations.filter { $0.agent != nil })
+            ForEach(groups, id: \.0) { title, items in section(title, items) }
+        }
+        .listStyle(.sidebar)
+        .overlay {
+            if core.conversations.isEmpty {
+                Text("Suas conversas aparecem aqui.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding()
             }
         }
-        .background(Color.primary.opacity(0.03))
     }
 
     @ViewBuilder private func section(_ title: String, _ items: [ConversationItem]) -> some View {
         if !items.isEmpty {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.top, 10)
-                .padding(.bottom, 2)
-            ForEach(items) { c in row(c) }
+            Section(title) {
+                ForEach(items) { row($0).tag(Optional($0.id)) }
+            }
         }
     }
 
-    private func row(_ c: ConversationItem) -> some View {
-        let selected = core.current == c.id
-        return Button {
-            core.select(c.id)
-            picked()
-        } label: {
-            HStack(spacing: 7) {
-                if c.team != nil {
-                    Image(systemName: "number")
-                        .font(.system(size: 9, weight: .heavy))
-                        .foregroundStyle(.white)
-                        .frame(width: 18, height: 18)
-                        .background(agentColor(c.title.replacingOccurrences(of: "# ", with: "")).gradient, in: RoundedRectangle(cornerRadius: 5))
-                } else if c.agent != nil {
+    @ViewBuilder private func row(_ c: ConversationItem) -> some View {
+        Group {
+            if c.team != nil {
+                Label(c.title.replacingOccurrences(of: "# ", with: ""), systemImage: "number").lineLimit(1)
+            } else if c.agent != nil {
+                Label {
+                    Text(c.title).lineLimit(1)
+                } icon: {
                     AgentAvatar(name: c.title, size: 18)
                 }
-                Text(c.team != nil ? c.title.replacingOccurrences(of: "# ", with: "") : c.title)
-                    .font(.callout)
-                    .fontWeight(c.team != nil || c.agent != nil ? .medium : .regular)
-                    .lineLimit(1)
+            } else {
+                Text(c.title).lineLimit(1)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(selected ? Color.accentColor.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
         .contextMenu {
             Button("Apagar", role: .destructive) { core.deleteConversation(c.id) }
         }
-        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -527,7 +458,8 @@ struct MessageBody: View {
                                 .padding(.bottom, 8)
                         }
                     }
-                    .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(nsColor: .separatorColor)))
                 } else {
                     Text(inline(p.body)).textSelection(.enabled)
                 }
@@ -567,28 +499,22 @@ private struct Turn: View {
                     .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(LinearGradient(colors: [Color.accentColor.opacity(0.75), Color.accentColor], startPoint: .top, endPoint: .bottom), in: RoundedRectangle(cornerRadius: 14))
+                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14))
                     .foregroundStyle(.white)
             } }
             HStack(alignment: .top, spacing: 8) {
                 if let agentName {
-                    AgentAvatar(name: agentName, size: 28, active: task.isActive)
-                    VStack(alignment: .leading, spacing: 8) { reply }
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(agentColor(agentName).opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
-                        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(agentColor(agentName).opacity(0.3)))
+                    AgentAvatar(name: agentName, size: 24)
                 } else {
                     FaiscaAvatar(size: 22, mood: avatarMood)
-                    VStack(alignment: .leading, spacing: 8) {
-                        if let model = task.model, !task.isActive { ModelChip(model: model) }
-                        reply
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                VStack(alignment: .leading, spacing: 8) {
+                    if agentName == nil, let model = task.model, !task.isActive { modelText(model) }
+                    reply
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .popIn()
         .contextMenu {
             Button("Copiar pedido") { copy(task.text) }
             if !task.output.isEmpty { Button("Copiar resposta") { copy(task.output) } }
@@ -608,9 +534,9 @@ private struct Turn: View {
     @ViewBuilder private var reply: some View {
         if let name = agentName {
             HStack(spacing: 6) {
-                Text(name).font(.system(size: 13, weight: .bold, design: .rounded)).foregroundStyle(agentColor(name))
-                if let model = task.model { ModelChip(model: model) }
-                if task.text.isEmpty { Label("chamado no canal", systemImage: "arrowshape.turn.up.right.fill").font(.caption2).foregroundStyle(.secondary) }
+                Text(name).font(.headline)
+                if let model = task.model { modelText(model) }
+                if task.text.isEmpty { Text("chamado no canal").font(.caption).foregroundStyle(.secondary) }
             }
         } else if task.target != "auto" && task.target != "chat" && task.target != "agent" && task.target != "new_agent" {
             Label(task.target == "cloud" ? "Agente na nuvem" : task.target == "request" ? "Pedido de melhoria" : "Agente em \(task.machine ?? "este Mac")",
@@ -624,7 +550,7 @@ private struct Turn: View {
         switch task.status {
         case "queued", "running":
             HStack(spacing: 8) {
-                if task.output.isEmpty { BouncingDots(color: agentName.map(agentColor) ?? .secondary).accessibilityLabel("Trabalhando") }
+                if task.output.isEmpty { ProgressView().controlSize(.small).accessibilityLabel("Trabalhando") }
                 Text(runningLabel(task)).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Cancelar") { core.act(task.id, "cancel") }
@@ -640,9 +566,6 @@ private struct Turn: View {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
             }
             .font(.callout)
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
         case "cancelled":
             Label("Cancelada", systemImage: "xmark.circle").font(.caption).foregroundStyle(.secondary)
         default:
@@ -654,6 +577,10 @@ private struct Turn: View {
                     .font(.callout.weight(.medium))
             }
         }
+    }
+
+    private func modelText(_ model: String) -> some View {
+        Text(modelInfo(model)?.name ?? model.capitalized).font(.caption).foregroundStyle(.secondary)
     }
 
     private func copy(_ s: String) {
@@ -670,13 +597,12 @@ private struct ApprovalCard: View {
         let request = task.target == "request"
         let newAgent = task.target == "new_agent"
         let mission = task.target == "agent"
-        VStack(alignment: .leading, spacing: 8) {
+        GroupBox { VStack(alignment: .leading, spacing: 8) {
             Label(request ? "Quero abrir um pedido de melhoria (\(task.kind ?? "funcionalidade")):"
                   : newAgent ? "Quero criar este agente (nome | papel | modelo | esforço | lugar):"
                   : mission ? "Esta etapa altera arquivos. Posso seguir?" : "Quero usar seu computador para isto:",
                   systemImage: request ? "sparkles.rectangle.stack" : newAgent ? "person.badge.plus" : "hand.raised.fill")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.yellow)
+                .font(.headline)
             Text(task.prompt ?? task.text)
                 .font(.callout)
                 .textSelection(.enabled)
@@ -692,12 +618,9 @@ private struct ApprovalCard: View {
                     .buttonStyle(.borderedProminent)
                 Button("Recusar") { core.act(task.id, "cancel") }
             }
-            .controlSize(.small)
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.yellow.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.yellow.opacity(0.35)))
+        .padding(4)
+        .frame(maxWidth: .infinity, alignment: .leading) }
     }
 }
 

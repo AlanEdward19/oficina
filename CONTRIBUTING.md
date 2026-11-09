@@ -26,7 +26,10 @@ para o agente.
 | Chat | `app/Sources/Oficina/Chat.swift` |
 | Agentes, equipes, missões e ajustes | `core/src/factory.rs` e `app/Sources/Oficina/Factory.swift` |
 | Escolha automática de modelo | `core/src/router.rs` |
-| Componentes animados das telas | `app/Sources/Oficina/Theme.swift` |
+| Peças compartilhadas das telas (prévia do pet, monograma, modelos) | `app/Sources/Oficina/Theme.swift` |
+| Limpeza de disco | `core/src/clean.rs` e `app/Sources/Oficina/Clean.swift` |
+| Painel da barra de menus e ferramentas | `app/Sources/Oficina/Tools.swift` |
+| Textos no idioma do Mac | `app/Sources/Oficina/L10n.swift` |
 
 Uma peça nova de roupinha ou casinha precisa de duas mudanças: o nome entra no vocabulário do core (assim o
 Claude passa a poder escolher a peça) e o desenho entra no `Pet.swift`. Peças fora do vocabulário são
@@ -37,6 +40,7 @@ ignoradas, então o app nunca desenha algo que não conhece.
 - Escreva textos de interface em português do Brasil, curtos e diretos.
 - Tudo que gasta tokens do usuário pede permissão antes.
 - A Faísca não lê conteúdo de tela nem títulos de janela; só nomes de apps e tempo de uso.
+- As telas usam os componentes padrão do macOS: janela comum, barra lateral, `Form`, toolbar e alertas do sistema. Nada de gradientes, cartões coloridos ou fontes arredondadas.
 - Animações contínuas vão para o Core Animation (servidor de janelas), nunca para timers por quadro no app.
 - Nada de dependências novas sem motivo forte: o core é Rust com poucas crates; o app é Swift sem pacotes.
 
@@ -58,7 +62,7 @@ cd app && swift build -c release
 bash scripts/build.sh && open build/Oficina.app
 ```
 
-O `e2e.sh` usa um `claude` falso e não gasta tokens. O CI roda os três primeiros comandos em todo pull request.
+O `e2e.sh` usa um `claude` falso e não gasta tokens. Testes de limpeza precisam de um `HOME` próprio: nunca rode limpeza contra a pasta real. O CI roda os três primeiros comandos em todo pull request.
 
 ## Pull requests
 

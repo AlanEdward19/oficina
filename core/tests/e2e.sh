@@ -172,6 +172,27 @@ sleep 2.6; equal 'processo morreu' 0 "$(pgrep -fx 'sleep 30' | wc -l | tr -d ' '
 echo 'isolamento'
 equal 'não vaza chave de API' 0 "$(grep -c ANTHROPIC_API_KEY "$tmp/args.log")"
 
+echo 'limpeza'
+# HOME próprio: este bloco nunca pode enxergar a pasta real de quem roda o teste.
+ch="$tmp/casa"; mkdir -p "$ch/Library/Caches/com.teste.app" "$tmp/c"
+head -c 9000 /dev/zero > "$ch/Library/Caches/com.teste.app/x"
+HOME="$ch" OFICINA_HOME="$tmp/c" OFICINA_LISTEN=127.0.0.1:7904 "$bin" 2>/dev/null & pc=$!
+up 7904
+cpost() { curl -s -m 8 -H "Authorization: Bearer $(cat "$tmp/c/token")" -H 'content-type: application/json' -X POST -d "$2" "http://127.0.0.1:7904/v1/clean/$1"; }
+scan=$(cpost scan '{"mode":"junk"}')
+check 'varredura acha cache' 'com.teste.app' "$scan"
+equal 'varrer não apaga' 1 "$([ -f "$ch/Library/Caches/com.teste.app/x" ] && echo 1)"
+equal 'id fora da lista não remove' 0 "$(cpost run '{"mode":"junk","ids":[9999]}' | py 'd["moved"]')"
+equal 'continua no lugar' 1 "$([ -f "$ch/Library/Caches/com.teste.app/x" ] && echo 1)"
+scan=$(cpost scan '{"mode":"junk"}')
+cid=$(echo "$scan" | py '[i["id"] for g in d["groups"] for i in g["items"] if i["name"]=="com.teste.app"][0]')
+body='{"mode":"junk","ids":['$cid']}'
+equal 'remove o marcado' 1 "$(cpost run "$body" | py 'd["moved"]')"
+equal 'foi para a Lixeira' 1 "$([ -f "$ch/.Trash/com.teste.app/x" ] && echo 1)"
+equal 'a lista vale uma vez' 0 "$(cpost run "$body" | py 'd["moved"]')"
+check 'desinstalar fora de Aplicativos recusa' 400 "$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(cat "$tmp/c/token")" -H 'content-type: application/json' -X POST -d '{"mode":"uninstall","app":"/etc"}' http://127.0.0.1:7904/v1/clean/scan)"
+kill $pc; wait $pc 2>/dev/null
+
 echo 'uso do Claude'
 mkdir -p "$tmp/proj/p"
 ts=$(python3 -c 'import datetime as d;print(d.datetime.now(d.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))')

@@ -1,3 +1,4 @@
+mod clean;
 mod config;
 mod conv;
 mod engine;
@@ -244,6 +245,71 @@ async fn settings_set(State(app): State<App>, Json(s): Json<factory::Settings>) 
     Json(app.engine.factory.set_settings(s))
 }
 
+// MARK: Limpeza. O trabalho de disco roda fora da fila principal.
+
+#[derive(serde::Deserialize)]
+struct CleanScan {
+    mode: clean::Mode,
+    app: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CleanRun {
+    mode: clean::Mode,
+    ids: Vec<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct CleanMap {
+    path: Option<String>,
+}
+
+async fn on_disk<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    tokio::task::spawn_blocking(f).await.ok()
+}
+
+async fn clean_scan(State(app): State<App>, Json(q): Json<CleanScan>) -> Response {
+    let e = app.engine.clone();
+    match on_disk(move || e.clean.scan(q.mode, q.app.as_deref())).await {
+        Some(Ok(scan)) => Json(scan).into_response(),
+        Some(Err(m)) => (StatusCode::BAD_REQUEST, m).into_response(),
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn clean_run(State(app): State<App>, Json(q): Json<CleanRun>) -> Response {
+    let e = app.engine.clone();
+    match on_disk(move || e.clean.run(q.mode, &q.ids)).await {
+        Some(out) => Json(out).into_response(),
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn clean_apps(State(app): State<App>) -> Response {
+    let e = app.engine.clone();
+    on_disk(move || e.clean.apps()).await.map_or(StatusCode::INTERNAL_SERVER_ERROR.into_response(), |v| Json(v).into_response())
+}
+
+async fn clean_startup(State(app): State<App>) -> Response {
+    let e = app.engine.clone();
+    on_disk(move || e.clean.startup()).await.map_or(StatusCode::INTERNAL_SERVER_ERROR.into_response(), |v| Json(v).into_response())
+}
+
+async fn clean_trash(State(app): State<App>) -> Response {
+    let e = app.engine.clone();
+    let bytes = on_disk(move || e.clean.trash_bytes()).await.flatten();
+    Json(serde_json::json!({ "bytes": bytes })).into_response()
+}
+
+async fn clean_map(State(app): State<App>, Json(q): Json<CleanMap>) -> Response {
+    let e = app.engine.clone();
+    match on_disk(move || e.clean.map(q.path.as_deref())).await {
+        Some(Ok(v)) => Json(v).into_response(),
+        Some(Err(m)) => (StatusCode::BAD_REQUEST, m).into_response(),
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 /// Tudo o que o painel da fábrica mostra.
 async fn factory_state(State(app): State<App>) -> impl IntoResponse {
     let e = &app.engine;
@@ -360,6 +426,12 @@ async fn main() {
         .route("/v1/brain/reset", post(brain_reset))
         .route("/v1/settings", get(settings_get).post(settings_set))
         .route("/v1/factory", get(factory_state))
+        .route("/v1/clean/scan", post(clean_scan))
+        .route("/v1/clean/run", post(clean_run))
+        .route("/v1/clean/apps", get(clean_apps))
+        .route("/v1/clean/startup", get(clean_startup))
+        .route("/v1/clean/trash", get(clean_trash))
+        .route("/v1/clean/map", post(clean_map))
         .route("/v1/agents", post(agent_create))
         .route("/v1/agents/{id}", delete(agent_delete))
         .route("/v1/agents/{id}/missions", post(mission_start))

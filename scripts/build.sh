@@ -26,7 +26,8 @@ cat > "$out/Info.plist" <<'EOF'
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>CFBundleDevelopmentRegion</key><string>pt-BR</string>
-  <key>CFBundleLocalizations</key><array><string>pt-BR</string></array>
+  <key>CFBundleLocalizations</key><array><string>pt-BR</string><string>en</string></array>
+  <key>NSAppleEventsUsageDescription</key><string>A Oficina usa automação para esvaziar a Lixeira e trocar o modo escuro quando você pede.</string>
 </dict></plist>
 EOF
 

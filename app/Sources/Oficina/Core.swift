@@ -203,6 +203,23 @@ final class Core: ObservableObject {
         return req
     }
 
+    /// Operações de disco podem levar minutos: tempo maior que o padrão.
+    func get<T: Decodable>(_ path: String) async -> T? {
+        var req = request(path)
+        req.timeoutInterval = 600
+        guard let (data, _) = try? await session.data(for: req) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    func post<T: Decodable>(_ path: String, _ body: [String: Any]) async -> T? {
+        var req = request(path, method: "POST")
+        req.timeoutInterval = 600
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (data, resp) = try? await session.data(for: req), (resp as? HTTPURLResponse)?.statusCode ?? 500 < 300 else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
     private func refresh() async throws {
         let (data, resp) = try await session.data(for: request("tasks"))
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.userAuthenticationRequired) }

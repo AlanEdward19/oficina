@@ -27,7 +27,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/team-channel.png" alt="A team channel in Oficina: agents Ana and Bia reply in colored bubbles, each tagged with the model that answered, and Bia is called in by an @mention from Ana" width="76%">
+  <img src="docs/media/team-channel.png" alt="A team channel in Oficina: Ana is mentioned, answers and calls in Bia, each reply labeled with the model that handled it" width="76%">
 </p>
 <p align="center"><sub>A team channel, with agents calling each other by @mention and a tag for the model behind every reply. The app's interface is in Brazilian Portuguese; the data here is from a demo.</sub></p>
 
@@ -50,8 +50,8 @@ Oficina puts all three in one small native app. The creature on your screen is t
 
 <table>
   <tr>
-    <td width="42%"><img src="docs/media/personalize.png" alt="The Personalize screen: Faísca large over an animated gradient, with color swatches, eye styles, personality cards and model cards"></td>
-    <td width="58%"><img src="docs/media/factory.png" alt="The Factory screen: agent cards with colored faces, a bar showing how many tasks each model handled, and a mission track paused at the approval stage"></td>
+    <td width="42%"><img src="docs/media/personalize.png" alt="The Personalize window: a macOS settings form with a live preview of Faísca, appearance, personality and brain options"></td>
+    <td width="58%"><img src="docs/media/factory.png" alt="The Factory window: a sidebar of agents and teams, with an agent page showing its mission paused at the approval stage"></td>
   </tr>
 </table>
 
@@ -142,3 +142,7 @@ cd core && cargo build --release && bash tests/e2e.sh
 ```
 
 The end-to-end suite brings up two real daemons with a fake `claude`, so it never touches your subscription.
+
+## License
+
+[MIT](LICENSE)

@@ -1418,8 +1418,22 @@ final class PetController {
 
     // MARK: Vida
 
-    /// Alguém abriu um app pela Dock: ela sai, corre até o ícone e volta.
+    private var pendingVisit: DispatchWorkItem?
+
+    /// Abriu um app pela Dock. Ela só vai até o ícone se o mouse continuar na
+    /// Dock depois do clique: quem clicou e saiu já foi cuidar da vida.
     func appOpened(_ id: String) {
+        pendingVisit?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let dock = self.dockFrame(), dock.contains(NSEvent.mouseLocation) else { return }
+            self.visit(id)
+        }
+        pendingVisit = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
+    }
+
+    /// Ela sai, corre até o ícone e volta.
+    func visit(_ id: String) {
         guard figure.mood != .sleeping, !resting, dockVisible(), iconX(id) != nil, !busy() else { return }
         let visit: () -> Void = { [weak self] in
             self?.reach(id, speed: 320) {

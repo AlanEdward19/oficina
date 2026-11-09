@@ -9,6 +9,10 @@ struct DockEnv: Codable, Identifiable, Equatable {
     var name: String
     var symbol: String
     var apps: [String]
+    /// Nome padrão, que acompanha o idioma do Mac. Some quando a pessoa dá um nome.
+    var preset: String?
+
+    var title: String { preset.map(tr) ?? name }
 }
 
 private struct DockFile: Codable {
@@ -68,7 +72,12 @@ final class DockStore: ObservableObject {
         if let data = try? Data(contentsOf: file),
            let saved = try? JSONDecoder().decode(DockFile.self, from: data),
            !saved.environments.isEmpty {
-            envs = saved.environments
+            // Dock salva antes dos nomes traduzidos: os padrões passam a acompanhar o idioma.
+            envs = saved.environments.map { env in
+                var e = env
+                if e.preset == nil && ["Trabalho", "Pessoal"].contains(e.name) { e.preset = e.name }
+                return e
+            }
             active = min(max(saved.active, 0), saved.environments.count - 1)
         } else {
             envs = DockStore.seed()
@@ -96,8 +105,8 @@ final class DockStore: ObservableObject {
         let personal = ["com.apple.finder", "com.apple.Safari", "com.apple.Music", "com.apple.Photos", "com.apple.MobileSMS"]
             .filter { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil }
         return [
-            DockEnv(id: UUID().uuidString, name: "Trabalho", symbol: "briefcase.fill", apps: work),
-            DockEnv(id: UUID().uuidString, name: "Pessoal", symbol: "house.fill", apps: personal),
+            DockEnv(id: UUID().uuidString, name: "Trabalho", symbol: "briefcase.fill", apps: work, preset: "Trabalho"),
+            DockEnv(id: UUID().uuidString, name: "Pessoal", symbol: "house.fill", apps: personal, preset: "Pessoal"),
         ]
     }
 
@@ -170,6 +179,11 @@ final class DockStore: ObservableObject {
     /// Igual à Dock do macOS: abre, ou traz para frente e reabre a janela.
     func open(_ id: String) {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return }
+        // Clicar no app que já está na frente esconde ele.
+        if let front = NSWorkspace.shared.frontmostApplication, front.bundleIdentifier == id, UserDefaults.standard.object(forKey: "dockClickHide") as? Bool ?? true {
+            front.hide()
+            return
+        }
         NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.unhide()
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
@@ -239,6 +253,7 @@ final class DockStore: ObservableObject {
 
     func renameCurrent(_ name: String) {
         envs[active].name = name
+        envs[active].preset = nil
         save()
     }
 
@@ -570,22 +585,26 @@ struct DockView: View {
 
     @ViewBuilder private func menu(for app: DockApp) -> some View {
         if app.pinned {
-            Button("Remover de \(store.current.name)") { store.unpin(app.id) }
+            Button(tr("Remover de %@", store.current.title)) { store.unpin(app.id) }
             if store.envs.count > 1 {
-                Menu("Mover para") {
+                Menu(tr("Mover para")) {
                     ForEach(Array(store.envs.enumerated()), id: \.element.id) { i, env in
-                        if i != store.active { Button(env.name) { store.move(app.id, to: i) } }
+                        if i != store.active { Button(env.title) { store.move(app.id, to: i) } }
                     }
                 }
             }
         } else {
-            Button("Fixar em \(store.current.name)") { store.pin(app.id) }
+            Button(tr("Fixar em %@", store.current.title)) { store.pin(app.id) }
         }
         Divider()
-        Button("Mostrar no Finder") { store.reveal(app.id) }
+        Button(tr("Mostrar no Finder")) { store.reveal(app.id) }
         if app.running {
-            Button("Sair") { store.quit(app.id) }
+            Button(tr("Sair")) { store.quit(app.id) }
         }
+    }
+
+    private func renameStation() {
+        askName(tr("Renomear estação"), store.current.title) { store.renameCurrent($0) }
     }
 
     private var environments: some View {
@@ -601,26 +620,28 @@ struct DockView: View {
                             .foregroundStyle(i == store.active ? Color.white : Color.white.opacity(0.55))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Ambiente \(env.name)\(i == store.active ? ", atual" : "")")
+                    .accessibilityLabel(tr("Estação %@", env.title))
+                    .accessibilityAddTraits(i == store.active ? .isSelected : [])
+                    .help(env.title)
                 }
             }
             if !vertical {
-                Text(store.current.name)
+                Button(store.current.title, action: renameStation)
+                    .buttonStyle(.plain)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.white.opacity(0.7))
+                    .help(tr("Renomear %@…", store.current.title))
             }
         }
         .padding(.bottom, 2)
         .contextMenu {
-            Button("Novo ambiente…") {
-                askName("Novo ambiente", "") { store.addEnvironment($0) }
+            Button(tr("Nova estação…")) {
+                askName(tr("Nova estação"), "") { store.addEnvironment($0) }
             }
-            Button("Renomear \(store.current.name)…") {
-                askName("Renomear ambiente", store.current.name) { store.renameCurrent($0) }
-            }
+            Button(tr("Renomear %@…", store.current.title), action: renameStation)
             if store.envs.count > 1 {
                 Divider()
-                Button("Apagar \(store.current.name)") { store.deleteCurrent() }
+                Button(tr("Apagar %@", store.current.title)) { store.deleteCurrent() }
             }
         }
     }
@@ -649,7 +670,7 @@ struct DockView: View {
                 Color.clear
                     .frame(width: store.homeOpen ? dockHomeWidth : 0, height: look.tile)
                     .animation(.easeInOut(duration: 0.25), value: store.homeOpen)
-                    .accessibilityLabel("Casa da Faísca")
+                    .accessibilityLabel(tr("Casa da Faísca"))
             }
         }
         .frame(minHeight: vertical ? nil : look.tile)
