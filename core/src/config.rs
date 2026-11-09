@@ -1,0 +1,122 @@
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    io::{Read, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::PathBuf,
+};
+
+/// Outra máquina da Oficina, alcançável pela rede.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Peer {
+    pub name: String,
+    pub url: String,
+    pub token: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub listen: String,
+    pub brain_model: String,
+    /// Esta máquina aceita executar tarefas locais?
+    pub execute_local: bool,
+    pub max_local_tasks: usize,
+    /// Ferramentas liberadas para agentes que rodam nesta máquina.
+    pub allowed_tools: Vec<String>,
+    pub machines: Vec<Peer>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            listen: "127.0.0.1:7878".into(),
+            brain_model: "haiku".into(),
+            execute_local: true,
+            max_local_tasks: 2,
+            allowed_tools: [
+                "Read",
+                "Grep",
+                "Glob",
+                "Edit",
+                "Write",
+                "WebSearch",
+                "WebFetch",
+                "Bash(ls *)",
+                "Bash(git status *)",
+                "Bash(git diff *)",
+                "Bash(git log *)",
+            ]
+            .map(String::from)
+            .to_vec(),
+            machines: vec![],
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Paths {
+    pub home: PathBuf,
+}
+
+impl Paths {
+    pub fn resolve() -> Self {
+        let home = std::env::var_os("OFICINA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").expect("HOME não definido"))
+                    .join("Library/Application Support/Oficina")
+            });
+        Self { home }
+    }
+    pub fn state(&self) -> PathBuf {
+        self.home.join("state.json")
+    }
+    pub fn workspace(&self) -> PathBuf {
+        self.home.join("workspace")
+    }
+    pub fn brain_dir(&self) -> PathBuf {
+        self.home.join("brain")
+    }
+}
+
+/// Lê (ou cria) a configuração e o token de acesso.
+pub fn load(paths: &Paths) -> std::io::Result<(Config, String)> {
+    for dir in [paths.home.clone(), paths.workspace(), paths.brain_dir()] {
+        fs::create_dir_all(&dir)?;
+    }
+    fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700))?;
+
+    let cfg_path = paths.home.join("config.json");
+    let mut cfg: Config = match fs::read(&cfg_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| std::io::Error::other(format!("config.json inválido: {e}")))?,
+        Err(_) => {
+            let cfg = Config::default();
+            fs::write(&cfg_path, serde_json::to_vec_pretty(&cfg)?)?;
+            cfg
+        }
+    };
+    if let Ok(listen) = std::env::var("OFICINA_LISTEN") {
+        cfg.listen = listen;
+    }
+
+    let token_path = paths.home.join("token");
+    let token = match fs::read_to_string(&token_path) {
+        Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => {
+            let mut raw = [0u8; 32];
+            fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
+            let t: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+            fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&token_path)?
+                .write_all(t.as_bytes())?;
+            t
+        }
+    };
+    Ok((cfg, token))
+}
