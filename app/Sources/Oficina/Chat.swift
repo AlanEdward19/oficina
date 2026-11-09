@@ -117,9 +117,9 @@ struct ChatView: View {
         if !core.connected { return "Reconectando ao core…" }
         if let t = thread.last(where: \.isActive) { return runningLabel(t) }
         if let s = core.usage?.limits.first(where: { $0.kind == "session" }) {
-            return "Faísca · sessão do Claude em \(Int(s.percent.rounded()))%"
+            return "\(core.settings.name) · sessão do Claude em \(Int(s.percent.rounded()))%"
         }
-        return "Faísca"
+        return core.settings.name
     }
 
     /// A conversa é uma sessão do Claude Code: este comando a retoma lá.
@@ -140,7 +140,7 @@ struct ChatView: View {
         VStack(spacing: 14) {
             Spacer()
             FaiscaAvatar(size: 64, mood: .idle)
-            Text("Oi! Sou a Faísca.").font(.title3.weight(.semibold))
+            Text("Oi! Sou \(core.settings.name).").font(.title3.weight(.semibold))
             Text("Converso, abro agentes na nuvem e trabalho neste Mac quando você deixar.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -217,7 +217,7 @@ struct ChatView: View {
                 .help("Onde executar: \(targetName)")
                 .accessibilityLabel("Onde executar: \(targetName)")
 
-                TextField("Mensagem para a Faísca…", text: $draft, axis: .vertical)
+                TextField("Mensagem para \(conversation?.agent != nil || conversation?.team != nil ? (conversation?.title ?? "") : core.settings.name)…", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...8)
                     .focused($focused)
@@ -289,7 +289,7 @@ private struct ConversationList: View {
         let cal = Calendar.current
         let now = Date()
         var out: [String: [ConversationItem]] = [:]
-        for c in core.conversations {
+        for c in core.conversations where c.agent == nil && c.team == nil {
             let d = Date(timeIntervalSince1970: TimeInterval(c.updatedAt) / 1000)
             let key: String
             if cal.isDateInToday(d) { key = "Hoje" }
@@ -317,6 +317,8 @@ private struct ConversationList: View {
             Divider().opacity(0.5)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
+                    section("Equipes", core.conversations.filter { $0.team != nil })
+                    section("Agentes", core.conversations.filter { $0.agent != nil })
                     if core.conversations.isEmpty {
                         Text("Suas conversas aparecem aqui.")
                             .font(.callout)
@@ -337,6 +339,18 @@ private struct ConversationList: View {
             }
         }
         .background(Color.primary.opacity(0.03))
+    }
+
+    @ViewBuilder private func section(_ title: String, _ items: [ConversationItem]) -> some View {
+        if !items.isEmpty {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                .padding(.bottom, 2)
+            ForEach(items) { c in row(c) }
+        }
     }
 
     private func row(_ c: ConversationItem) -> some View {
@@ -427,6 +441,7 @@ private func runningLabel(_ t: TaskItem) -> String {
     case ("queued", _): return "Na fila…"
     case (_, "cloud"): return "Abrindo agente na nuvem…"
     case (_, "request"): return "Abrindo issue no GitHub…"
+    case (_, "agent"): return "Agente trabalhando…"
     case (_, "machine"): return "Trabalhando em \(t.machine ?? "uma máquina")…"
     default: return "Pensando…"
     }
@@ -439,7 +454,7 @@ private struct Turn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            if !task.text.isEmpty { HStack {
                 Spacer(minLength: 48)
                 Text(task.text)
                     .textSelection(.enabled)
@@ -447,7 +462,7 @@ private struct Turn: View {
                     .padding(.vertical, 8)
                     .background(Color.accentColor.opacity(0.85), in: RoundedRectangle(cornerRadius: 14))
                     .foregroundStyle(.white)
-            }
+            } }
             HStack(alignment: .top, spacing: 8) {
                 FaiscaAvatar(size: 22, mood: avatarMood)
                 VStack(alignment: .leading, spacing: 8) {
@@ -473,7 +488,11 @@ private struct Turn: View {
     }
 
     @ViewBuilder private var reply: some View {
-        if task.target != "auto" && task.target != "chat" {
+        if let id = task.agent, let name = core.agentNames[id] {
+            Label(name, systemImage: "person.crop.circle")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+        } else if task.target != "auto" && task.target != "chat" && task.target != "agent" && task.target != "new_agent" {
             Label(task.target == "cloud" ? "Agente na nuvem" : task.target == "request" ? "Pedido de melhoria" : "Agente em \(task.machine ?? "este Mac")",
                   systemImage: task.target == "cloud" ? "cloud" : task.target == "request" ? "sparkles.rectangle.stack" : "desktopcomputer")
                 .font(.caption.weight(.medium))
@@ -529,9 +548,13 @@ private struct ApprovalCard: View {
 
     var body: some View {
         let request = task.target == "request"
+        let newAgent = task.target == "new_agent"
+        let mission = task.target == "agent"
         VStack(alignment: .leading, spacing: 8) {
-            Label(request ? "Quero abrir um pedido de melhoria (\(task.kind ?? "funcionalidade")):" : "Quero usar seu computador para isto:",
-                  systemImage: request ? "sparkles.rectangle.stack" : "hand.raised.fill")
+            Label(request ? "Quero abrir um pedido de melhoria (\(task.kind ?? "funcionalidade")):"
+                  : newAgent ? "Quero criar este agente (nome | papel | modelo | esforço | lugar):"
+                  : mission ? "Esta etapa altera arquivos. Posso seguir?" : "Quero usar seu computador para isto:",
+                  systemImage: request ? "sparkles.rectangle.stack" : newAgent ? "person.badge.plus" : "hand.raised.fill")
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.yellow)
             Text(task.prompt ?? task.text)
@@ -539,11 +562,13 @@ private struct ApprovalCard: View {
                 .textSelection(.enabled)
             Text(request
                  ? "Vira uma issue pública no GitHub da Oficina, e um agente do Claude implementa e abre um pull request."
+                 : newAgent ? "Ele aparece na Fábrica e na barra de conversas."
+                 : mission ? "O agente edita arquivos do projeto dele, sem comandos livres no terminal."
                  : "Posso ler e editar arquivos da pasta de trabalho, sem comandos livres no terminal.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Button(request ? "Abrir issue" : "Executar neste Mac") { core.act(task.id, "approve") }
+                Button(request ? "Abrir issue" : newAgent ? "Criar agente" : mission ? "Aprovar" : "Executar neste Mac") { core.act(task.id, "approve") }
                     .buttonStyle(.borderedProminent)
                 Button("Recusar") { core.act(task.id, "cancel") }
             }
@@ -575,12 +600,25 @@ private struct TypingDots: View {
 
 /// A Faísca em miniatura, com o mesmo desenho do pet.
 struct FaiscaAvatar: View {
+    /// Cores escolhidas em Personalizar.
+    nonisolated(unsafe) static var bodyColor = Color(red: 1, green: 0.62, blue: 0.16)
+    nonisolated(unsafe) static var sparkColor = Color.yellow
+
     var size: CGFloat
     var mood: Mood
+    var body_: Color?
+    var spark_: Color?
+
+    init(size: CGFloat, mood: Mood, body: Color? = nil, spark: Color? = nil) {
+        self.size = size
+        self.mood = mood
+        body_ = body
+        spark_ = spark
+    }
 
     var body: some View {
-        let body: Color = mood == .sad ? Color(red: 0.62, green: 0.56, blue: 0.62) : Color(red: 1, green: 0.62, blue: 0.16)
-        let spark: Color = mood == .thinking ? .cyan : mood == .waiting ? .yellow : mood == .sad ? .red : .yellow
+        let body: Color = mood == .sad ? Color(red: 0.62, green: 0.56, blue: 0.62) : (body_ ?? Self.bodyColor)
+        let spark: Color = mood == .thinking ? .cyan : mood == .waiting ? .yellow : mood == .sad ? .red : (spark_ ?? Self.sparkColor)
         ZStack {
             Circle().fill(body)
             HStack(spacing: size * 0.14) {

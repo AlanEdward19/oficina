@@ -22,6 +22,10 @@ pub enum Target {
     Machine,
     /// Pedido de melhoria: vira uma issue no GitHub.
     Request,
+    /// Turno de um agente da fábrica.
+    Agent,
+    /// Pedido da assistente para criar um agente (espera aprovação).
+    NewAgent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,6 +51,9 @@ pub struct Task {
     pub text: String,
     pub target: Target,
     pub machine: Option<String>,
+    /// Agente que responde esta tarefa.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Conversa a que a tarefa pertence.
     #[serde(default)]
     pub conversation: Option<String>,
@@ -119,6 +126,7 @@ impl Store {
             text,
             target,
             machine,
+            agent: None,
             conversation,
             kind: None,
             prompt: None,

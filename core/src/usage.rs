@@ -32,11 +32,23 @@ pub struct ModelUse {
 }
 
 #[derive(Clone, Default, Serialize)]
+pub struct ProjectUse {
+    pub name: String,
+    pub path: String,
+    pub branch: Option<String>,
+    pub today: u64,
+    pub week: u64,
+    pub last: u64,
+}
+
+#[derive(Clone, Default, Serialize)]
 pub struct Local {
     pub today: u64,
     pub week: u64,
     pub models: Vec<ModelUse>,
     pub active_sessions: usize,
+    /// Projetos em que você atuou com o Claude Code, do mais recente ao mais antigo.
+    pub projects: Vec<ProjectUse>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -95,6 +107,9 @@ struct Row {
     timestamp: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
+    cwd: Option<String>,
+    #[serde(rename = "gitBranch")]
+    branch: Option<String>,
     message: Option<Msg>,
 }
 
@@ -124,7 +139,10 @@ pub struct Scanner {
     offsets: HashMap<PathBuf, u64>,
     /// Totais por (hora desde 1970, modelo): poucos KB em vez de uma entrada por resposta.
     buckets: HashMap<(u32, u16), u64>,
-    recent: HashMap<u64, (u32, u16, u64)>,
+    recent: HashMap<u64, (u32, u16, u16, u64)>,
+    project_buckets: HashMap<(u32, u16), u64>,
+    project_paths: Vec<String>,
+    project_last: HashMap<u16, (u64, Option<String>)>,
     order: std::collections::VecDeque<u64>,
     models: Vec<String>,
     active: usize,
@@ -137,6 +155,9 @@ impl Scanner {
             offsets: HashMap::new(),
             buckets: HashMap::new(),
             recent: HashMap::new(),
+            project_buckets: HashMap::new(),
+            project_paths: Vec::new(),
+            project_last: HashMap::new(),
             order: std::collections::VecDeque::new(),
             models: Vec::new(),
             active: 0,
@@ -153,6 +174,7 @@ impl Scanner {
         self.offsets.retain(|p, _| seen.contains(p));
         let oldest = (now.saturating_sub(RETENTION) / 3600) as u32;
         self.buckets.retain(|(hour, _), _| *hour >= oldest);
+        self.project_buckets.retain(|(hour, _), _| *hour >= oldest);
         self.summary(now)
     }
 
@@ -266,8 +288,12 @@ impl Scanner {
         let hour = (ts / 3600) as u32;
         let key = h.finish();
         // A mesma resposta é gravada várias vezes; a última tem o total final.
-        if let Some((h0, m0, t0)) = self.recent.insert(key, (hour, model, tokens)) {
+        let project = self.project_index(row.cwd.as_deref().unwrap_or(""));
+        if let Some((h0, m0, p0, t0)) = self.recent.insert(key, (hour, model, project, tokens)) {
             if let Some(b) = self.buckets.get_mut(&(h0, m0)) {
+                *b = b.saturating_sub(t0);
+            }
+            if let Some(b) = self.project_buckets.get_mut(&(h0, p0)) {
                 *b = b.saturating_sub(t0);
             }
         } else {
@@ -279,6 +305,74 @@ impl Scanner {
             }
         }
         *self.buckets.entry((hour, model)).or_default() += tokens;
+        *self.project_buckets.entry((hour, project)).or_default() += tokens;
+        let last = self.project_last.entry(project).or_insert((0, None));
+        if ts >= last.0 {
+            *last = (ts, row.branch.filter(|b| !b.is_empty() && b != "HEAD"));
+        }
+    }
+
+    fn project_index(&mut self, path: &str) -> u16 {
+        if let Some(i) = self.project_paths.iter().position(|p| p == path) {
+            return i as u16;
+        }
+        self.project_paths.push(path.to_string());
+        (self.project_paths.len() - 1) as u16
+    }
+
+    /// Projetos reais: worktrees e subpastas contam para o projeto raiz; a
+    /// pasta interna da Oficina e temporárias ficam de fora.
+    fn projects_summary(&self, day_hour: u32, week_hour: u32) -> Vec<ProjectUse> {
+        let roots: Vec<Option<String>> = {
+            let bases: Vec<Option<String>> = self.project_paths.iter().map(|p| project_base(p)).collect();
+            let known: Vec<&String> = bases.iter().flatten().filter(|b| !is_container(b)).collect();
+            bases
+                .iter()
+                .map(|b| {
+                    b.as_ref().map(|b| {
+                        known
+                            .iter()
+                            .filter(|k| b.starts_with(&format!("{k}/")))
+                            .min_by_key(|k| k.len())
+                            .map(|k| k.to_string())
+                            .unwrap_or_else(|| b.clone())
+                    })
+                })
+                .collect()
+        };
+        let mut grouped: HashMap<String, ProjectUse> = HashMap::new();
+        for (i, root) in roots.iter().enumerate() {
+            let Some(root) = root else { continue };
+            let i = i as u16;
+            let p = grouped.entry(root.clone()).or_insert_with(|| ProjectUse {
+                name: root.rsplit('/').next().unwrap_or(root).to_string(),
+                path: root.clone(),
+                branch: None,
+                today: 0,
+                week: 0,
+                last: 0,
+            });
+            for (&(hour, project), &tokens) in &self.project_buckets {
+                if project == i && hour >= week_hour {
+                    p.week += tokens;
+                    if hour >= day_hour {
+                        p.today += tokens;
+                    }
+                }
+            }
+            if let Some((last, branch)) = self.project_last.get(&i) {
+                // Branches de worktree temporária não dizem em que você está.
+                let useful = branch.as_ref().filter(|b| !b.starts_with("worktree-"));
+                if useful.is_some() && (*last >= p.last || p.branch.is_none()) {
+                    p.branch = useful.cloned();
+                }
+                p.last = p.last.max(*last);
+            }
+        }
+        let mut out: Vec<ProjectUse> = grouped.into_values().filter(|p| p.week > 0).collect();
+        out.sort_by(|a, b| b.last.cmp(&a.last));
+        out.truncate(12);
+        out
     }
 
     fn model_index(&mut self, name: &str) -> u16 {
@@ -318,8 +412,29 @@ impl Scanner {
             week,
             models,
             active_sessions: self.active,
+            projects: self.projects_summary(day_hour, week_hour),
         }
     }
+}
+
+/// Raiz de um caminho de trabalho, ou None se não é um projeto.
+fn project_base(path: &str) -> Option<String> {
+    if path.is_empty() || path.contains("Application Support/Oficina") || path.starts_with("/private/") || path.starts_with("/tmp") {
+        return None;
+    }
+    if let Some(i) = path.find("/.claude/worktrees/") {
+        return Some(path[..i].to_string());
+    }
+    if path.contains("/.claude/") || path.ends_with("/.claude") {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+/// Pasta que guarda vários projetos: não absorve as de dentro.
+fn is_container(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or("").to_lowercase();
+    path.matches('/').count() <= 2 || ["desktop", "projects", "projetos", "developer", "code", "repos", "src", "documents", "downloads", "work"].contains(&base.as_str())
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -452,6 +567,45 @@ mod tests {
         let l = Scanner::new(d.clone()).scan();
         assert_eq!(l.week, 16);
         assert_eq!(l.active_sessions, 1);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn agrupa_worktrees_e_subpastas_no_projeto() {
+        let d = dir();
+        let t = now() - 10;
+        let line = |id: &str, cwd: &str, branch: &str| {
+            row(id, t, "claude-opus-5-5", 5).replacen("{\"type\":\"assistant\",", &format!("{{\"type\":\"assistant\",\"cwd\":\"{cwd}\",\"gitBranch\":\"{branch}\","), 1)
+        };
+        let body = line("a", "/Users/x/Projects/Vida", "main")
+            + &line("b", "/Users/x/Projects/Vida/.claude/worktrees/agent-1", "worktree-agent-1")
+            + &line("c", "/Users/x/Projects/Vida/core/src", "main")
+            + &line("d", "/Users/x/Projects", "")
+            + &line("e", "/Users/x/Projects/Outro", "dev")
+            + &line("f", "/Users/x/.claude/spares/y", "z");
+        fs::write(d.join("proj/s.jsonl"), body).unwrap();
+        let l = Scanner::new(d.clone()).scan();
+        let vida = l.projects.iter().find(|p| p.name == "Vida").unwrap();
+        assert_eq!(vida.week, 60);
+        assert_eq!(vida.branch.as_deref(), Some("main"));
+        assert!(l.projects.iter().any(|p| p.name == "Outro"));
+        assert!(!l.projects.iter().any(|p| p.name == "y" || p.name == "agent-1" || p.name == "src"));
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn reconhece_projetos_pelo_cwd() {
+        let d = dir();
+        let t = now() - 10;
+        let line = |id: &str, cwd: &str, branch: &str| {
+            row(id, t, "claude-opus-5-5", 5).replacen("{\"type\":\"assistant\",", &format!("{{\"type\":\"assistant\",\"cwd\":\"{cwd}\",\"gitBranch\":\"{branch}\","), 1)
+        };
+        fs::write(d.join("proj/s.jsonl"), line("a", "/Users/x/Oficina", "main") + &line("b", "/Users/x/Oficina", "dock") + &line("c", "/private/tmp/y", "z")).unwrap();
+        let l = Scanner::new(d.clone()).scan();
+        assert_eq!(l.projects.len(), 1);
+        assert_eq!(l.projects[0].name, "Oficina");
+        assert_eq!(l.projects[0].week, 40);
+        assert_eq!(l.projects[0].branch.as_deref(), Some("dock"));
         fs::remove_dir_all(d).unwrap();
     }
 

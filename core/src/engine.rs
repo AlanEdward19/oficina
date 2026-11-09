@@ -1,6 +1,7 @@
 use crate::{
     config::{Config, Paths, Peer},
     conv::Conversations,
+    factory::{AgentSpec, Factory},
     peer,
     mind::{Action, Initiative, Mind, decor, outfit},
     route::{self, CliEvent, Dest, Holdback},
@@ -24,8 +25,7 @@ use tokio::{
     sync::Semaphore,
 };
 
-const BRAIN_BASE: &str = "Você é a Faísca, assistente pessoal que vive no Mac do usuário. \
-Responda em português do Brasil, curto e direto. Você não tem ferramentas nesta conversa.";
+const BRAIN_RULES: &str = "Responda em português do Brasil. Você não tem ferramentas nesta conversa.";
 
 const BRAIN_DELEGATE: &str = " Se o pedido exigir trabalho real (programar, pesquisar a fundo, \
 mexer em arquivos), não finja que fez: responda SOMENTE com uma linha no formato \
@@ -34,17 +34,19 @@ mexer em arquivos), não finja que fez: responda SOMENTE com uma linha no format
 Sem texto antes ou depois da linha. Conversa e perguntas simples você responde normalmente. \
 Se o usuário pedir uma melhoria em você mesma ou na Oficina (funcionalidade nova, widget da Dock, roupinha, \
 casinha, ou um problema), responda SOMENTE com `@@delegar melhoria: <funcionalidade|widget|roupa|casa|bug>: \
-<descrição clara do pedido>`.";
+<descrição clara do pedido>`. Se o usuário pedir para criar um agente, responda SOMENTE com \
+`@@delegar criar-agente: <nome> | <papel> | <haiku|sonnet|opus|fable> | <low|medium|high|xhigh|max> | <mac|nuvem>`.";
 
 pub struct Engine {
     pub store: Arc<Store>,
     pub cfg: Config,
     pub paths: Paths,
     pub name: String,
-    claude: PathBuf,
+    pub(crate) claude: PathBuf,
     /// Uma fila por conversa: duas conversas não esperam uma pela outra.
-    brains: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    pub(crate) brains: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub convs: Conversations,
+    pub factory: Factory,
     local: Semaphore,
     running: Mutex<HashMap<String, i32>>,
     usage: Mutex<Usage>,
@@ -65,9 +67,9 @@ enum Where {
     Remote(Peer),
 }
 
-struct RunOut {
-    text: String,
-    session: Option<String>,
+pub(crate) struct RunOut {
+    pub(crate) text: String,
+    pub(crate) session: Option<String>,
 }
 
 /// Procura o `claude` também onde um app gráfico não enxerga pelo PATH.
@@ -134,7 +136,7 @@ fn hostname() -> String {
 
 /// Garante que o CLI use o login da assinatura, sem herdar chave de API nem
 /// o contexto de outra sessão do Claude Code.
-fn claude_cmd(path: &PathBuf) -> Command {
+pub(crate) fn claude_cmd(path: &PathBuf) -> Command {
     let mut cmd = Command::new(path);
     for (key, _) in std::env::vars_os() {
         let k = key.to_string_lossy();
@@ -149,7 +151,7 @@ fn claude_cmd(path: &PathBuf) -> Command {
     cmd
 }
 
-const STREAM_ARGS: [&str; 6] = [
+pub(crate) const STREAM_ARGS: [&str; 6] = [
     "-p",
     "--output-format",
     "stream-json",
@@ -163,6 +165,7 @@ impl Engine {
         let local = Semaphore::new(cfg.max_local_tasks.max(1));
         let mind = Arc::new(Mind::open(paths.home.join("mind.json"), store.tx.clone()));
         let convs = Conversations::open(paths.home.join("conversas.json"));
+        let factory = Factory::open(paths.home.join("fabrica.json"));
         // Tarefas de antes das conversas vão para uma conversa própria.
         if let Some(first) = store.has_orphans() {
             let c = convs.create(Some("Conversas anteriores"), Some(first));
@@ -177,6 +180,7 @@ impl Engine {
             claude: find_claude(),
             brains: Default::default(),
             convs,
+            factory,
             local,
             running: Default::default(),
             usage: Default::default(),
@@ -207,8 +211,23 @@ impl Engine {
             self.convs.touch(&id, Some(&text));
             Some(id)
         };
-        let task = self.store.create(text, target, machine, conversation);
+        // Numa conversa de agente ou canal de equipe, quem responde é a fábrica.
+        let owner = conversation.as_deref().and_then(|c| self.convs.get(c));
+        let (agent, team) = owner.map(|c| (c.agent, c.team)).unwrap_or_default();
+        let target = if agent.is_some() || team.is_some() { Target::Agent } else { target };
+        let task = self.store.create(text.clone(), target, machine, conversation);
+        if let Some(a) = &agent {
+            self.store.update(&task.id, |t| t.agent = Some(a.clone()));
+        }
         let (me, id) = (self.clone(), task.id.clone());
+        if let Some(a) = agent {
+            tokio::spawn(async move { me.run_agent(&id, &a, &text, false).await });
+            return Ok(task);
+        }
+        if let Some(t) = team.and_then(|t| self.factory.team(&t)) {
+            tokio::spawn(async move { me.run_team(&id, &t, &text).await });
+            return Ok(task);
+        }
         tokio::spawn(async move { me.run(id).await });
         Ok(task)
     }
@@ -220,7 +239,7 @@ impl Engine {
             Target::Chat => self.run_brain(&id, &t.text, false).await,
             Target::Cloud => self.run_cloud(&id, &t.text).await,
             Target::Machine => self.run_machine(&id, &t.text).await,
-            Target::Request => {}
+            Target::Request | Target::Agent | Target::NewAgent => {}
         }
     }
 
@@ -235,6 +254,20 @@ impl Engine {
         let t = self.store.get(id)?;
         if t.status != Status::AwaitingApproval {
             return None;
+        }
+        if t.target == Target::NewAgent {
+            let result = AgentSpec::parse_line(t.prompt.as_deref().unwrap_or(""))
+                .ok_or_else(|| "Não entendi os dados do agente.".to_string())
+                .and_then(|spec| self.create_agent(spec))
+                .map(|a| Some(format!("Pronto! {} está na fábrica ({}, esforço {}).", a.name, a.model, a.effort)));
+            self.store.update(id, |t| t.status = Status::Running);
+            self.finish(id, result);
+            return self.store.get(id);
+        }
+        if let (Target::Agent, Some(agent)) = (t.target, t.agent.as_deref()) {
+            self.store.update(id, |t| t.status = Status::Running);
+            self.approve_mission(id, agent);
+            return self.store.get(id);
         }
         let task = self.store.update(id, |t| t.status = Status::Queued)?;
         let (me, id, prompt) = (self.clone(), id.to_string(), t.prompt.unwrap_or(t.text));
@@ -328,6 +361,9 @@ impl Engine {
             return Some(t);
         }
         let task = self.store.update(id, |t| t.status = Status::Cancelled)?;
+        if let Some(a) = task.agent.as_deref() {
+            self.mission_cancelled(a);
+        }
         let pid = self.running.lock().unwrap().get(id).copied();
         if let Some(pid) = pid {
             signal_group(pid, libc::SIGINT);
@@ -343,7 +379,7 @@ impl Engine {
         Some(task)
     }
 
-    fn start(&self, id: &str) -> bool {
+    pub(crate) fn start(&self, id: &str) -> bool {
         let t = self.store.update(id, |t| {
             if t.status != Status::Cancelled {
                 t.status = Status::Running;
@@ -356,7 +392,7 @@ impl Engine {
         running
     }
 
-    fn finish(&self, id: &str, result: Result<Option<String>, String>) {
+    pub(crate) fn finish(&self, id: &str, result: Result<Option<String>, String>) {
         let ok = result.is_ok();
         let done = self.store.update(id, |t| {
             if t.status == Status::Cancelled {
@@ -454,7 +490,7 @@ impl Engine {
         let mut cmd = claude_cmd(&self.claude);
         cmd.current_dir(self.paths.brain_dir())
             .args(STREAM_ARGS)
-            .args(["--model", &self.cfg.brain_model, "--tools", "", "--setting-sources", "", "--no-session-persistence"])
+            .args(["--model", &self.factory.settings().brain_model, "--tools", "", "--setting-sources", "", "--no-session-persistence"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -485,16 +521,27 @@ impl Engine {
         let session = self.convs.get(&conv).and_then(|c| c.session);
         let memory = self.mind.summary();
         let memory = if memory.is_empty() { String::new() } else { format!(" Memória sobre o usuário (use com naturalidade, sem recitar): {memory}") };
-        let system = if delegate {
-            format!("{BRAIN_BASE}{memory}{BRAIN_DELEGATE}")
+        let me = self.factory.settings();
+        let base = format!("Você é {}, assistente pessoal que vive no Mac do usuário. Personalidade: {} {BRAIN_RULES}", me.name, me.personality);
+        let roster = self.factory.roster();
+        let roster = if roster.is_empty() || !delegate {
+            String::new()
         } else {
-            format!("{BRAIN_BASE}{memory}")
+            format!(" Agentes da sua fábrica: {roster}. Para passar uma tarefa a um deles, responda SOMENTE com `@@delegar agente: <nome>: <tarefa>`.")
+        };
+        let system = if delegate {
+            format!("{base}{memory}{BRAIN_DELEGATE}{roster}")
+        } else {
+            format!("{base}{memory}")
         };
         let mut cmd = claude_cmd(&self.claude);
         cmd.current_dir(self.paths.brain_dir())
             .args(STREAM_ARGS)
-            .args(["--model", &self.cfg.brain_model, "--tools", "", "--setting-sources", ""])
+            .args(["--model", &me.brain_model, "--tools", "", "--setting-sources", ""])
             .args(["--system-prompt", &system]);
+        if !me.brain_effort.is_empty() {
+            cmd.args(["--effort", &me.brain_effort]);
+        }
         if let Some(s) = session.as_deref() {
             cmd.args(["--resume", s]);
         }
@@ -520,6 +567,27 @@ impl Engine {
             Some((Dest::Machine, prompt)) => {
                 self.store.update(id, |t| {
                     t.target = Target::Machine;
+                    t.prompt = Some(prompt);
+                    if t.status != Status::Cancelled {
+                        t.status = Status::AwaitingApproval;
+                    }
+                });
+            }
+            Some((Dest::Agent(name), prompt)) => match self.factory.agent_by_name(&name) {
+                Some(a) => {
+                    self.store.update(id, |t| {
+                        t.target = Target::Agent;
+                        t.agent = Some(a.id.clone());
+                        t.status = Status::Queued;
+                    });
+                    self.run_agent(id, &a.id, &prompt, false).await;
+                }
+                None => self.finish(id, Err(format!("Não encontrei o agente {name} na fábrica."))),
+            },
+            // Criar agente pede aprovação, como tudo que muda a fábrica.
+            Some((Dest::NewAgent, prompt)) => {
+                self.store.update(id, |t| {
+                    t.target = Target::NewAgent;
                     t.prompt = Some(prompt);
                     if t.status != Status::Cancelled {
                         t.status = Status::AwaitingApproval;
@@ -583,7 +651,7 @@ impl Engine {
 
     /// O `--cloud` só aceita rodar num terminal, então ganha um pseudo-terminal.
     /// Com o link em mãos a sessão já existe na nuvem e o processo local sai.
-    async fn open_cloud(&self, id: &str, prompt: &str) -> Result<String, String> {
+    pub(crate) async fn open_cloud(&self, id: &str, prompt: &str) -> Result<String, String> {
         let mut cmd = claude_cmd(&PathBuf::from("/usr/bin/script"));
         cmd.current_dir(self.paths.workspace())
             .args(["-q", "/dev/null"])
@@ -632,7 +700,7 @@ impl Engine {
     }
 
     /// O `--cloud` parte de um repositório git.
-    async fn ensure_repo(&self) -> Result<(), String> {
+    pub(crate) async fn ensure_repo(&self) -> Result<(), String> {
         let dir = self.paths.workspace();
         if dir.join(".git").exists() {
             return Ok(());
@@ -652,7 +720,7 @@ impl Engine {
         Ok(())
     }
 
-    async fn stream(
+    pub(crate) async fn stream(
         &self,
         id: &str,
         mut cmd: Command,
@@ -752,6 +820,10 @@ impl Engine {
             })
             .await;
             if let Ok(scanned) = scanned {
+                let projects = scanned.projects.iter().take(6)
+                    .map(|p| format!("{}{}", p.name, p.branch.as_ref().map(|b| format!(" (branch {b})")).unwrap_or_default()))
+                    .collect::<Vec<_>>().join(", ");
+                self.mind.set_projects(projects);
                 let mut u = self.usage.lock().unwrap();
                 u.local = scanned;
                 u.updated_at = usage::now();

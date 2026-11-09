@@ -20,6 +20,11 @@ pub struct Conversation {
     pub title: String,
     /// Sessão do Claude Code por trás da conversa.
     pub session: Option<String>,
+    /// Conversa direta com um agente, ou canal de uma equipe.
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub team: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -32,6 +37,12 @@ pub struct Conversations {
 
 fn ms() -> u64 {
     now() * 1000 + (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_millis()).unwrap_or(0) as u64)
+}
+
+/// Número único para ids de agentes e equipes.
+pub fn next_id() -> u64 {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    ms() * 1000 + SEQ.fetch_add(1, Ordering::Relaxed) % 1000
 }
 
 /// Só ids gerados aqui (letras e números) viram nome de arquivo.
@@ -81,6 +92,8 @@ impl Conversations {
             id: format!("c{now:x}{:x}", self.seq.fetch_add(1, Ordering::Relaxed)),
             title: title.map(title_from).unwrap_or_else(|| NEW_TITLE.into()),
             session: None,
+            agent: None,
+            team: None,
             created_at: created_at.unwrap_or(now),
             updated_at: created_at.unwrap_or(now),
         };
@@ -114,6 +127,15 @@ impl Conversations {
         }
     }
 
+    pub fn set_owner(&self, id: &str, agent: Option<String>, team: Option<String>) {
+        let mut list = self.list.lock().unwrap();
+        if let Some(c) = list.iter_mut().find(|c| c.id == id) {
+            c.agent = agent;
+            c.team = team;
+            self.save(&list);
+        }
+    }
+
     pub fn rename(&self, id: &str, title: &str) -> bool {
         let mut list = self.list.lock().unwrap();
         let Some(c) = list.iter_mut().find(|c| c.id == id) else { return false };
@@ -135,7 +157,7 @@ impl Conversations {
 
     /// A conversa usada por último (para tarefas da própria Faísca).
     pub fn current(&self) -> Option<String> {
-        self.list.lock().unwrap().iter().max_by_key(|c| c.updated_at).map(|c| c.id.clone())
+        self.list.lock().unwrap().iter().filter(|c| c.agent.is_none() && c.team.is_none()).max_by_key(|c| c.updated_at).map(|c| c.id.clone())
     }
 }
 

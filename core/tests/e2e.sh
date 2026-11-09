@@ -34,6 +34,7 @@ ta=$(cat "$tmp/a/token")
 api()  { curl -s -m 8 -H "Authorization: Bearer $ta" "$@"; }
 send() { api -X POST -d "$1" -H 'content-type: application/json' http://127.0.0.1:7901/v1/messages | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])'; }
 get()  { api "http://127.0.0.1:7901/v1/tasks/$1" | python3 -c "import json,sys;t=json.load(sys.stdin);print(t['$2'])"; }
+py() { python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
 wait_for() { for _ in $(seq 1 40); do s=$(get "$1" status); [[ " $2 " == *" $s "* ]] && { echo "$s"; return; }; sleep 0.1; done; echo "timeout($s)"; }
 
 echo 'segurança'
@@ -97,6 +98,52 @@ rid=$(api -X POST -H 'content-type: application/json' -d '{"kind":"widget","text
 check 'pedido pelo menu' done "$(wait_for "$rid" done\ failed)"
 equal 'sem agente quando não pedido' 0 "$(grep '^GH:' "$tmp/args.log" | tail -1 | grep -c 'agente')"
 
+echo 'ajustes e fábrica'
+post() { api -X POST -H 'content-type: application/json' -d "$2" "http://127.0.0.1:7901/v1/$1"; }
+post settings '{"name":"Zeca","personality":"Bem-humorada.","brain_model":"opus","brain_effort":"high","body_color":"#3366FF"}' >/dev/null
+check 'ajustes salvos' '"name":"Zeca"' "$(api http://127.0.0.1:7901/v1/settings)"
+id=$(send '{"text":"olá de novo"}'); wait_for "$id" done >/dev/null
+line=$(grep -- '--system-prompt' "$tmp/args.log" | tail -1)
+check 'cérebro com o nome' 'Você é Zeca' "$line"
+check 'cérebro com o modelo' '--model opus' "$line"
+check 'cérebro com o esforço' '--effort high' "$line"
+post settings '{"brain_model":"haiku"}' >/dev/null
+ana=$(post agents '{"name":"Ana","role":"Revisa código","model":"sonnet","effort":"high"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+bia=$(post agents '{"name":"Bia","role":"Escreve testes","model":"opus","effort":"low"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+check 'nome repetido recusado' 400 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"name":"ana","role":"x"}' http://127.0.0.1:7901/v1/agents)"
+conv_ana=$(api http://127.0.0.1:7901/v1/factory | py '[a for a in d["agents"] if a["name"]=="Ana"][0]["conversation"]')
+id=$(send "{\"text\":\"oi Ana\",\"conversation\":\"$conv_ana\"}"); check 'mensagem direta ao agente' done "$(wait_for "$id" done\ failed)"
+check 'agente responde' 'resposta do agente' "$(get "$id" output)"
+line=$(grep -- '--append-system-prompt' "$tmp/args.log" | tail -1)
+check 'agente com modelo e esforço' '--model sonnet --effort high' "$line"
+id=$(send "{\"text\":\"mais uma\",\"conversation\":\"$conv_ana\"}"); wait_for "$id" done >/dev/null
+check 'agente retoma a sessão' '--resume sess-agente' "$(grep -- '--append-system-prompt' "$tmp/args.log" | tail -1)"
+id=$(send '{"text":"delegar-agente"}'); check 'cérebro delega ao agente' done "$(wait_for "$id" done\ failed)"
+check 'resposta veio do agente' 'resposta do agente' "$(get "$id" output)"
+id=$(send '{"text":"pedir-agente"}'); check 'criar agente pede aprovação' awaiting_approval "$(wait_for "$id" awaiting_approval\ done\ failed)"
+api -o /dev/null -X POST "http://127.0.0.1:7901/v1/tasks/$id/approve"; sleep 0.2
+check 'agente criado pelo cérebro' 'Nova' "$(api http://127.0.0.1:7901/v1/factory | py '[a["name"] for a in d["agents"]]')"
+team=$(post teams "{\"name\":\"Qualidade\",\"members\":[\"$ana\",\"$bia\"]}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["conversation"])')
+id=$(send "{\"text\":\"chama-colega\",\"conversation\":\"$team\"}"); wait_for "$id" done >/dev/null; sleep 0.5
+replies=$(api "http://127.0.0.1:7901/v1/conversations/$team" | py '[t["output"] for t in d["tasks"]]')
+check 'equipe: primeiro responde' '@Bia' "$replies"
+check 'equipe: colega mencionado responde' 'recebi do colega' "$replies"
+mission() { api http://127.0.0.1:7901/v1/factory | py "[a for a in d['agents'] if a['name']=='$1'][0]['mission']['$2']"; }
+post "agents/$bia/missions" '{"goal":"melhorar testes"}' >/dev/null
+for _ in $(seq 1 40); do [ "$(mission Bia status)" = aguardando ] && break; sleep 0.1; done
+equal 'missão para antes de executar' aguardando "$(mission Bia status)"
+check 'etapas de leitura sem editar' 'dontAsk' "$(grep -- '--append-system-prompt' "$tmp/args.log" | tail -1)"
+wait=$(api "http://127.0.0.1:7901/v1/conversations/$(api http://127.0.0.1:7901/v1/factory | py '[a for a in d["agents"] if a["name"]=="Bia"][0]["conversation"]')" | py '[t["id"] for t in d["tasks"] if t["status"]=="awaiting_approval"][0]')
+api -o /dev/null -X POST "http://127.0.0.1:7901/v1/tasks/$wait/approve"
+for _ in $(seq 1 40); do [ "$(mission Bia status)" = concluida ] && break; sleep 0.1; done
+equal 'missão concluída' concluida "$(mission Bia status)"
+equal 'quatro etapas com veredito' 4 "$(api http://127.0.0.1:7901/v1/factory | py 'len([a for a in d["agents"] if a["name"]=="Bia"][0]["mission"]["log"])')"
+post "agents/$ana/missions" '{"goal":"sem-prova"}' >/dev/null
+for _ in $(seq 1 40); do [ "$(mission Ana status)" = falhou ] && break; sleep 0.1; done
+equal 'sem evidência não passa' falhou "$(mission Ana status)"
+check 'apagar agente' 204 "$(api -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:7901/v1/agents/$ana")"
+post settings '{"name":"Faísca"}' >/dev/null
+
 echo 'atalhos e cancelamento'
 id=$(send '{"text":"/pc listar"}'); check '/pc roda direto' done "$(wait_for "$id" done\ failed)"
 check '/pc sem o prefixo' 'eco: listar' "$(get "$id" output)"
@@ -131,7 +178,6 @@ equal 'cache evita rodar de novo' "$calls" "$(grep -c 'no-session-persistence' "
 kill $pu 2>/dev/null
 
 echo 'mente'
-py() { python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
 mind() { api http://127.0.0.1:7901/v1/mind; }
 check 'estado da mente' '"drives"' "$(mind)"
 check 'aceita eventos' 204 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '[{"kind":"pet_petted"},{"kind":"app_focus","bundle":"com.anthropic.claude","name":"Claude"},{"kind":"presence","idle":3,"running":["com.apple.Safari"]}]' http://127.0.0.1:7901/v1/mind/events)"

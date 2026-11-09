@@ -27,7 +27,12 @@ final class PetFigure {
     private let badge = CATextLayer()
     private let outfitLayer = CALayer()
     private let propLayer = CALayer()
+    private var baseBody = NSColor(calibratedRed: 1, green: 0.62, blue: 0.16, alpha: 1).cgColor
+    private var baseSpark = NSColor.systemYellow.cgColor
+    private var eyeStyle = "tall"
+    private var size: CGFloat = 1
     private var bodyColor = NSColor(calibratedRed: 1, green: 0.62, blue: 0.16, alpha: 1).cgColor
+    private var wornOutfit: OutfitData?
     private(set) var mood: Mood = .idle
     private var blinkTimer: Timer?
 
@@ -129,7 +134,7 @@ final class PetFigure {
         badge.isHidden = next != .waiting
 
         var fill = NSColor(cgColor: bodyColor) ?? .orange
-        var sparkColor: NSColor = .systemYellow
+        var sparkColor = NSColor(cgColor: baseSpark) ?? .systemYellow
         switch next {
         case .thinking: sparkColor = .cyan
         case .sad, .lonely:
@@ -187,10 +192,25 @@ final class PetFigure {
     }
 
     private func setEyes(height: CGFloat, y: CGFloat) {
-        for (eye, x) in [(leftEye, w / 2 - 15.0), (rightEye, w / 2 + 6.0)] {
-            eye.frame = CGRect(x: x, y: y, width: 9, height: height)
-            eye.cornerRadius = min(height, 9) / 2
+        let width: CGFloat = eyeStyle == "round" ? 12 : eyeStyle == "dots" ? 6 : 9
+        let tall = eyeStyle == "round" ? min(height, 12) : eyeStyle == "dots" ? min(height, 6) : height
+        for (eye, cx) in [(leftEye, w / 2 - 10.5), (rightEye, w / 2 + 10.5)] {
+            eye.frame = CGRect(x: cx - width / 2, y: y + (height - tall) / 2, width: width, height: tall)
+            eye.cornerRadius = min(tall, width) / 2
         }
+    }
+
+    /// Aparência escolhida em Personalizar.
+    func customize(_ s: AssistantSettings) {
+        baseBody = color(s.body_color)
+        baseSpark = color(s.spark_color)
+        eyeStyle = s.eyes
+        size = CGFloat(s.size)
+        stem.isHidden = !s.antenna
+        spark.isHidden = !s.antenna
+        bodyColor = wornOutfit.map { color($0.body) } ?? baseBody
+        apply(mood)
+        setPose(pose, duration: 0.2)
     }
 
     /// Olhar para um lado (-1 esquerda, 1 direita), sem animar sempre.
@@ -558,7 +578,7 @@ final class PetFigure {
         if p != .bed && pose == .bed { showBed(false, animated: duration > 0) }
         if p == .bed && pose != .bed && bedFront.opacity == 0 { showBed(true, animated: duration > 0) }
         pose = p
-        let s: CGFloat = p == .out ? 1 : homeScale
+        let s: CGFloat = p == .out ? size : homeScale
         let sx = p == .bed ? s * 1.1 : s
         let sy = p == .bed ? s * 0.86 : s
         var t = CATransform3DMakeTranslation(w / 2, 0, 0)
@@ -642,12 +662,13 @@ final class PetFigure {
     // MARK: Roupinha
 
     func wear(_ outfit: OutfitData?) {
+        wornOutfit = outfit
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         outfitLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
         propLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
-        bodyColor = outfit.map { color($0.body) } ?? NSColor(calibratedRed: 1, green: 0.62, blue: 0.16, alpha: 1).cgColor
+        bodyColor = outfit.map { color($0.body) } ?? baseBody
         guard let o = outfit else {
             apply(mood)
             return

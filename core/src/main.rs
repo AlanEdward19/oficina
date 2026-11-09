@@ -1,6 +1,7 @@
 mod config;
 mod conv;
 mod engine;
+mod factory;
 mod mind;
 mod peer;
 mod route;
@@ -16,7 +17,7 @@ use axum::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use engine::Engine;
 use futures_util::stream::{self, Stream};
@@ -234,6 +235,75 @@ async fn conversation_delete(State(app): State<App>, Path(id): Path<String>) -> 
     StatusCode::NO_CONTENT
 }
 
+async fn settings_get(State(app): State<App>) -> impl IntoResponse {
+    Json(app.engine.factory.settings())
+}
+
+async fn settings_set(State(app): State<App>, Json(s): Json<factory::Settings>) -> impl IntoResponse {
+    Json(app.engine.factory.set_settings(s))
+}
+
+/// Tudo o que o painel da fábrica mostra.
+async fn factory_state(State(app): State<App>) -> impl IntoResponse {
+    let e = &app.engine;
+    let agents: Vec<serde_json::Value> = e.factory.agents().iter().map(|a| {
+        let mut v = serde_json::to_value(a).unwrap_or_default();
+        v["status"] = e.agent_status(a).into();
+        v
+    }).collect();
+    Json(serde_json::json!({ "agents": agents, "teams": e.factory.teams() }))
+}
+
+async fn agent_create(State(app): State<App>, Json(s): Json<factory::AgentSpec>) -> Response {
+    match app.engine.create_agent(s) {
+        Ok(a) => (StatusCode::CREATED, Json(a)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+async fn agent_delete(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.delete_agent(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+#[derive(Deserialize)]
+struct MissionBody {
+    goal: String,
+}
+
+async fn mission_start(State(app): State<App>, Path(id): Path<String>, Json(m): Json<MissionBody>) -> Response {
+    match app.engine.start_mission(&id, &m.goal) {
+        Ok(a) => Json(a).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TeamBody {
+    name: String,
+    #[serde(default)]
+    members: Vec<String>,
+}
+
+async fn team_create(State(app): State<App>, Json(t): Json<TeamBody>) -> Response {
+    match app.engine.create_team(&t.name, &t.members) {
+        Ok(team) => (StatusCode::CREATED, Json(team)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+async fn team_delete(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.delete_team(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+#[derive(Deserialize)]
+struct Member {
+    team: Option<String>,
+}
+
+async fn agent_team(State(app): State<App>, Path(id): Path<String>, Json(m): Json<Member>) -> StatusCode {
+    if app.engine.set_member(&id, m.team) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
 async fn brain_reset(State(app): State<App>) -> StatusCode {
     app.engine.reset_brain().await;
     StatusCode::NO_CONTENT
@@ -287,6 +357,14 @@ async fn main() {
         .route("/v1/tasks/{id}/cancel", post(cancel))
         .route("/v1/events", get(events))
         .route("/v1/brain/reset", post(brain_reset))
+        .route("/v1/settings", get(settings_get).post(settings_set))
+        .route("/v1/factory", get(factory_state))
+        .route("/v1/agents", post(agent_create))
+        .route("/v1/agents/{id}", delete(agent_delete))
+        .route("/v1/agents/{id}/missions", post(mission_start))
+        .route("/v1/agents/{id}/team", post(agent_team))
+        .route("/v1/teams", post(team_create))
+        .route("/v1/teams/{id}", delete(team_delete))
         .route("/v1/conversations", get(conversations).post(conversation_create))
         .route("/v1/conversations/{id}", get(conversation).delete(conversation_delete))
         .route("/v1/conversations/{id}/rename", post(conversation_rename))

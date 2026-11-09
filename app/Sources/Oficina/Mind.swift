@@ -232,6 +232,7 @@ struct MindView: View {
                     section("Neurônios") { neurons(s) }
                     section("O que ela percebe agora") { inputs(s) }
                     section("Pensamentos") { thoughts(s) }
+                    section("Projetos em que você atua") { projects }
                     section("O que ela lembra de você") { memory(s) }
                     section("Roupinhas") { outfits(s) }
                     section("Casinha") { homes(s) }
@@ -369,6 +370,28 @@ struct MindView: View {
             .controlSize(.small)
             Text("Para ela lembrar de algo, diga no chat: “lembre que …”.").font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    private var projects: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            let list = core.usage?.projects ?? []
+            if list.isEmpty {
+                Text("Ainda não vi projetos no Claude Code.").font(.callout).foregroundStyle(.secondary)
+            }
+            ForEach(list, id: \.path) { p in
+                HStack {
+                    Label(p.name, systemImage: "folder")
+                    if let b = p.branch { Text(b).font(.caption).foregroundStyle(.secondary) }
+                    Spacer()
+                    Text(tokens(p.week)).monospacedDigit().foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            }
+        }
+    }
+
+    private func tokens(_ n: UInt64) -> String {
+        n >= 1_000_000 ? String(format: "%.1f M", Double(n) / 1_000_000) : "\(n / 1000) mil"
     }
 
     private func outfits(_ s: MindSnapshot) -> some View {

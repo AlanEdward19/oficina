@@ -24,6 +24,7 @@ para o agente.
 | Conversa, agentes e roteamento | `core/src/engine.rs` e `core/src/route.rs` |
 | Notch e uso do Claude | `app/Sources/Oficina/Notch.swift` e `core/src/usage.rs` |
 | Chat | `app/Sources/Oficina/Chat.swift` |
+| Agentes, equipes, missões e ajustes | `core/src/factory.rs` e `app/Sources/Oficina/Factory.swift` |
 
 Uma peça nova de roupinha ou casinha precisa de duas mudanças: o nome entra no vocabulário do core (assim o
 Claude passa a poder escolher a peça) e o desenho entra no `Pet.swift`. Peças fora do vocabulário são

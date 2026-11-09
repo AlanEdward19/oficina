@@ -11,6 +11,10 @@ pub enum Dest {
     Machine,
     /// Melhoria na própria Faísca, com o tipo.
     Request(String),
+    /// Tarefa para um agente da fábrica (nome).
+    Agent(String),
+    /// Criar um agente: `nome | papel | modelo | esforço | lugar`.
+    NewAgent,
 }
 
 pub const REQUEST_KINDS: [&str; 5] = ["funcionalidade", "widget", "roupa", "casa", "bug"];
@@ -44,6 +48,11 @@ pub fn parse_delegate(text: &str) -> Option<(Dest, String)> {
         "nuvem" => (Dest::Cloud, prompt),
         "maquina" | "máquina" => (Dest::Machine, prompt),
         // `@@delegar melhoria: roupa: chapéu de pirata`
+        "agente" => {
+            let (name, text) = prompt.split_once(':')?;
+            (Dest::Agent(name.trim().trim_start_matches('@').to_string()), text)
+        }
+        "criar-agente" => (Dest::NewAgent, prompt),
         "melhoria" => {
             let (kind, text) = prompt.split_once(':').unwrap_or(("funcionalidade", prompt));
             let kind = kind.trim().to_lowercase();
@@ -208,6 +217,13 @@ mod tests {
             parse_delegate(" @@delegar maquina: abrir x\n"),
             Some((Dest::Machine, "abrir x".into()))
         );
+    }
+
+    #[test]
+    fn delegacao_para_agentes() {
+        assert_eq!(parse_delegate("@@delegar agente: @Revisora: olha o PR"), Some((Dest::Agent("Revisora".into()), "olha o PR".into())));
+        assert_eq!(parse_delegate("@@delegar criar-agente: Ana | revisa | opus | high | mac"), Some((Dest::NewAgent, "Ana | revisa | opus | high | mac".into())));
+        assert_eq!(parse_delegate("@@delegar agente: sem tarefa"), None);
     }
 
     #[test]

@@ -154,6 +154,7 @@ struct State {
     running_apps: Vec<String>,
     tasks: HashSet<String>,
     last_interaction: u64,
+    projects: String,
     /// Colocada para descansar na Dock: dorme até aqui, mesmo com você por perto.
     rest_until: u64,
     work_streak: f64,
@@ -212,6 +213,7 @@ impl Mind {
                 running_apps: Vec::new(),
                 tasks: HashSet::new(),
                 last_interaction: now,
+                projects: String::new(),
                 rest_until: 0,
                 work_streak: 0.0,
                 mood: "neutra".into(),
@@ -333,7 +335,17 @@ impl Mind {
     }
 
     pub fn summary(&self) -> String {
-        self.state.lock().unwrap().mem.summary()
+        let s = self.state.lock().unwrap();
+        let mut out = s.mem.summary();
+        if !s.projects.is_empty() {
+            out.push_str(&format!(" Projetos em que o usuário está atuando: {}.", s.projects));
+        }
+        out
+    }
+
+    /// Resumo dos projetos atuais, vindo da leitura de uso.
+    pub fn set_projects(&self, projects: String) {
+        self.state.lock().unwrap().projects = projects;
     }
 
     // MARK: Ciclo

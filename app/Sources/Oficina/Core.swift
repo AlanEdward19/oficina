@@ -6,6 +6,7 @@ struct TaskItem: Identifiable, Decodable, Equatable {
     var target: String
     var machine: String?
     var conversation: String?
+    var agent: String?
     var kind: String?
     var prompt: String?
     var status: String
@@ -15,7 +16,7 @@ struct TaskItem: Identifiable, Decodable, Equatable {
     let createdAt: UInt64
 
     enum CodingKeys: String, CodingKey {
-        case id, text, target, machine, conversation, kind, prompt, status, output, url, error
+        case id, text, target, machine, conversation, agent, kind, prompt, status, output, url, error
         case createdAt = "created_at"
     }
 
@@ -39,6 +40,14 @@ struct ModelUsage: Decodable, Equatable {
     let tokens: UInt64
 }
 
+struct ProjectUse: Decodable, Equatable {
+    let name: String
+    let path: String
+    let branch: String?
+    let today: UInt64
+    let week: UInt64
+}
+
 struct UsageData: Decodable, Equatable {
     let limits: [UsageLimit]
     let limitsNote: String?
@@ -46,9 +55,10 @@ struct UsageData: Decodable, Equatable {
     let week: UInt64
     let models: [ModelUsage]
     let activeSessions: Int
+    let projects: [ProjectUse]?
 
     enum CodingKeys: String, CodingKey {
-        case limits, today, week, models
+        case limits, today, week, models, projects
         case limitsNote = "limits_note"
         case activeSessions = "active_sessions"
     }
@@ -58,11 +68,13 @@ struct ConversationItem: Decodable, Identifiable, Equatable {
     let id: String
     let title: String
     let session: String?
+    let agent: String?
+    let team: String?
     let createdAt: UInt64
     let updatedAt: UInt64
 
     enum CodingKeys: String, CodingKey {
-        case id, title, session
+        case id, title, session, agent, team
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -87,6 +99,8 @@ private struct CoreEvent: Decodable {
 final class Core: ObservableObject {
     @Published private(set) var tasks: [TaskItem] = []
     @Published private(set) var usage: UsageData?
+    @Published private(set) var settings = AssistantSettings()
+    @Published private(set) var agentNames: [String: String] = [:]
     @Published private(set) var conversations: [ConversationItem] = []
     /// Conversa aberta no chat (nil = nova, ainda sem mensagens).
     @Published private(set) var current: String? = UserDefaults.standard.string(forKey: "conversaAtual")
@@ -136,6 +150,8 @@ final class Core: ObservableObject {
                 problem = nil
                 loadUsage(fresh: false)
                 loadConversations()
+                loadSettings()
+                _ = await loadFactory()
                 if let s = await mindSnapshot() {
                     mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit, decor: s.decor)
                 }
@@ -250,6 +266,51 @@ final class Core: ObservableObject {
                 problem = "Sem contato com o core."
             }
         }
+    }
+
+    // MARK: Ajustes e fábrica
+
+    func loadSettings() {
+        Task {
+            guard let (data, _) = try? await session.data(for: request("settings")),
+                  let s = try? JSONDecoder().decode(AssistantSettings.self, from: data) else { return }
+            settings = s
+        }
+    }
+
+    func saveSettings(_ s: AssistantSettings) {
+        var req = request("settings", method: "POST")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONEncoder().encode(s)
+        Task {
+            guard let (data, _) = try? await session.data(for: req),
+                  let saved = try? JSONDecoder().decode(AssistantSettings.self, from: data) else { return }
+            settings = saved
+        }
+    }
+
+    func loadFactory() async -> FactoryState? {
+        guard let (data, _) = try? await session.data(for: request("factory")),
+              let s = try? JSONDecoder().decode(FactoryState.self, from: data) else { return nil }
+        agentNames = Dictionary(uniqueKeysWithValues: s.agents.map { ($0.id, $0.name) })
+        return s
+    }
+
+    /// Devolve o erro em texto, ou nil se deu certo.
+    func factoryPost(_ path: String, _ body: [String: Any]) async -> String? {
+        var req = request(path, method: "POST")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (data, resp) = try? await session.data(for: req), let code = (resp as? HTTPURLResponse)?.statusCode else {
+            return "Sem contato com o core."
+        }
+        loadConversations()
+        return code < 300 ? nil : String(decoding: data, as: UTF8.self)
+    }
+
+    func factoryDelete(_ path: String) async {
+        _ = try? await session.data(for: request(path, method: "DELETE"))
+        loadConversations()
     }
 
     // MARK: Conversas

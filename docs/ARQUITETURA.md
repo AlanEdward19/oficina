@@ -45,6 +45,9 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 | `POST /v1/tasks/{id}/approve`, `/cancel` | Aprovar ou cancelar |
 | `GET /v1/usage`, `POST /v1/usage/refresh` | Limites e tokens; responde na hora e atualiza em segundo plano |
 | `GET/POST /v1/conversations`, `GET/DELETE /v1/conversations/{id}`, `POST …/rename` | Conversas e histórico |
+| `GET/POST /v1/settings`, `GET /v1/factory` | Ajustes da assistente; agentes e equipes |
+| `POST /v1/agents`, `DELETE /v1/agents/{id}`, `POST …/missions`, `POST …/team` | Agentes e missões |
+| `POST /v1/teams`, `DELETE /v1/teams/{id}` | Equipes |
 | `GET /v1/events` | SSE com `{kind: task\|delta\|usage\|resync}` |
 
 ## Conversas
@@ -53,6 +56,20 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
   para continuar no Claude Code: o chat copia o comando. Cada conversa tem sua própria fila no core.
 - O histórico completo fica na Oficina: as mensagens recentes em `state.json`; as que saem da memória vão
   para `conversas/<id>.jsonl`, com cartões e links. Apagar uma conversa não apaga a sessão no Claude Code.
+
+## Projetos, ajustes e fábrica
+
+- **Projetos:** vêm do `cwd` e do branch nos logs do Claude Code. Worktrees e subpastas contam para a raiz.
+  Vão para o resumo do cérebro e servem de pasta de trabalho dos agentes.
+- **Ajustes** (`fabrica.json`): nome, personalidade, modelo e esforço do cérebro, cores, olhos, antena, tamanho.
+- **Agentes:** nome, papel, modelo, esforço, lugar (Mac ou nuvem) e projeto. Cada um é uma conversa e mantém
+  a própria sessão do Claude. No chat, o cérebro delega com `@@delegar agente:` e propõe novos com
+  `@@delegar criar-agente:`, que pede aprovação.
+- **Equipes:** um canal em que `@Nome` chama um agente. Respostas que mencionam colegas são repassadas, até
+  6 repasses por mensagem.
+- **Missões:** Investigar → Propor → Executar → Verificar. As etapas de leitura rodam em `dontAsk` com
+  ferramentas de leitura; Executar espera aprovação; cada etapa termina com veredito e evidência, e um
+  "concluído" sem evidência para a missão. A ideia dos playbooks vem do Waymark público.
 
 ## Uso do Claude
 

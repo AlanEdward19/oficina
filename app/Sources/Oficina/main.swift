@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dock: DockController!
     private var bubble: BubbleController!
     private var mindPanel: NSPanel?
+    private var toolPanels: [String: NSPanel] = [:]
     private var presenceTimer: Timer?
     private var usageTimer: Timer?
     private var panel: KeyPanel!
@@ -73,6 +74,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer.tolerance = 60
         RunLoop.main.add(timer, forMode: .common)
         usageTimer = timer
+        core.$settings
+            .receive(on: RunLoop.main)
+            .removeDuplicates()
+            .sink { [weak self] s in
+                MainActor.assumeIsolated {
+                    FaiscaAvatar.bodyColor = colorFromHex(s.body_color)
+                    FaiscaAvatar.sparkColor = colorFromHex(s.spark_color)
+                    self?.pet.figure.customize(s)
+                    self?.mindPanel?.title = "Mente de \(s.name)"
+                }
+            }
+            .store(in: &bag)
         core.$mind
             .receive(on: RunLoop.main)
             .removeDuplicates()
@@ -81,6 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         watchPresence()
         core.start()
         if CommandLine.arguments.contains("--abrir-mente") { openMind() }
+        if CommandLine.arguments.contains("--abrir-fabrica") { openFactory() }
+        if CommandLine.arguments.contains("--abrir-personalizar") { openPersonalize() }
         if CommandLine.arguments.contains("--dormir") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
                 self?.pet.comeOut { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.pet.putToBed() } }
@@ -237,7 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 640),
                         styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
-        p.title = "Mente da Faísca"
+        p.title = "Mente de \(core.settings.name)"
         p.titlebarAppearsTransparent = true
         p.isReleasedWhenClosed = false
         p.contentView = NSHostingView(rootView: MindView(core: core))
@@ -249,6 +264,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         p.makeKeyAndOrderFront(nil)
+    }
+
+    /// Janela de ferramenta: existe só enquanto está aberta.
+    private func openTool<V: View>(_ key: String, title: String, size: NSSize, _ view: V) {
+        if let p = toolPanels[key] {
+            NSApp.activate(ignoringOtherApps: true)
+            p.makeKeyAndOrderFront(nil)
+            return
+        }
+        let p = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                        styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+        p.title = title
+        p.isReleasedWhenClosed = false
+        p.contentView = NSHostingView(rootView: view)
+        p.center()
+        toolPanels[key] = p
+        // Sem foco automático: senão o formulário rola e corta o topo.
+        DispatchQueue.main.async { p.makeFirstResponder(nil) }
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: p, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.toolPanels[key] = nil }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        p.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func openPersonalize() {
+        openTool("personalizar", title: "Personalizar", size: NSSize(width: 440, height: 640), PersonalizeView(core: core))
+    }
+
+    @objc private func openFactory() {
+        openTool("fabrica", title: "Fábrica de agentes", size: NSSize(width: 620, height: 640), FactoryView(core: core) { [weak self] conv in
+            self?.core.select(conv)
+            self?.openChat()
+        })
     }
 
     @objc private func suggestNow() { core.suggest() }
@@ -416,7 +465,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bed = NSMenuItem(title: "Colocar para dormir", action: #selector(putToBed), keyEquivalent: "")
         bed.target = self
         menu.addItem(bed)
-        let mind = NSMenuItem(title: "Mente da Faísca…", action: #selector(openMind), keyEquivalent: "")
+        let factory = NSMenuItem(title: "Fábrica de agentes…", action: #selector(openFactory), keyEquivalent: "")
+        factory.target = self
+        menu.addItem(factory)
+        let personalize = NSMenuItem(title: "Personalizar…", action: #selector(openPersonalize), keyEquivalent: "")
+        personalize.target = self
+        menu.addItem(personalize)
+        let mind = NSMenuItem(title: "Mente de \(core.settings.name)…", action: #selector(openMind), keyEquivalent: "")
         mind.target = self
         menu.addItem(mind)
         let suggest = NSMenuItem(title: "Me sugere algo", action: #selector(suggestNow), keyEquivalent: "")

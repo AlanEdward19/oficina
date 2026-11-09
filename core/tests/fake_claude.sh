@@ -27,10 +27,25 @@ case "$prompt" in
     echo '{"type":"result","result":"Claro! {\"name\":\"AI Engineer\",\"body\":\"#FF9E29\",\"head\":{\"shape\":\"headset\",\"color\":\"#222222\"},\"face\":{\"shape\":\"glasses_round\",\"color\":\"#111111\"},\"neck\":{\"shape\":\"lanyard\",\"color\":\"#3366FF\"},\"badge\":{\"shape\":\"AI\",\"color\":\"#00AAFF\"},\"prop\":\"laptop\"}","is_error":false}'
     exit 0 ;;
 esac
+if [[ "$*" == *--append-system-prompt* ]]; then
+  echo '{"type":"system","subtype":"init","session_id":"sess-agente"}'
+  case "$prompt" in
+    *sem-prova*"Etapa: "*) body='VEREDITO: concluido' ;;
+    *"Etapa: "*) body='Feito.\nVEREDITO: concluido\nEVIDENCIA: arquivo.rs:1' ;;
+    *"disse:"*) body='recebi do colega' ;;
+    *chama-colega*) body='@Bia pode olhar isso?' ;;
+    *) body='resposta do agente' ;;
+  esac
+  printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$body"
+  printf '{"type":"result","result":"%s","is_error":false,"session_id":"sess-agente"}\n' "$body"
+  exit 0
+fi
 delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$1"; }
 echo '{"type":"system","subtype":"init","session_id":"sess-1"}'
 
 case "$prompt" in
+  *delegar-agente*) t='@@delegar agente: Ana: revisar o PR' ;;
+  *pedir-agente*) t='@@delegar criar-agente: Nova | testa coisas | opus | high | mac' ;;
   *delegar-melhoria*) t='@@delegar melhoria: roupa: chapéu de pirata com tapa-olho' ;;
   *delegar-nuvem*) t='@@delegar nuvem: fazer na nuvem' ;;
   *delegar-pc*)    t='@@delegar maquina: fazer no pc' ;;
