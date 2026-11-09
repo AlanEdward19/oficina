@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pet = PetController()
         pet.view.onClick = { [weak self] in
             self?.core.mindEvents([["kind": "pet_click"]])
+            self?.pet.wakeUp()
             self?.togglePanel()
         }
         pet.onEvent = { [weak self] kind in self?.core.mindEvents([["kind": kind]]) }
@@ -80,6 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         watchPresence()
         core.start()
         if CommandLine.arguments.contains("--abrir-mente") { openMind() }
+        if CommandLine.arguments.contains("--dormir") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.pet.comeOut { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.pet.putToBed() } }
+            }
+        }
         if CommandLine.arguments.contains("--visitar-dock") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 guard let self, let id = self.dock.store.allIDs.dropFirst().first else { return }
@@ -114,6 +120,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.pet.dockMoved(home: self.dock.petHome(for: target), duration: duration, curve: curve)
         }
         pet.onMoveStart = { [weak self] in self?.bubble.hideForMove() }
+        pet.onRest = { [weak self] secs in self?.core.mindEvents([["kind": "pet_rest", "secs": secs]]) }
+        // Ao acordar, se ainda houver uma pergunta guardada, ela faz agora.
+        pet.onWake = { [weak self] in
+            guard let self, let i = self.core.mind?.initiative else { return }
+            self.present(i)
+        }
         pet.onMoveEnd = { [weak self] in self?.bubble.showAfterMove() }
         dock.store.onOpen = { [weak self] id in
             self?.core.mindEvents([["kind": "dock_open", "bundle": id]])
@@ -166,16 +178,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pet.setMind(brief.mood, sleeping: brief.sleeping)
         if brief.outfit != lastBrief?.outfit { pet.wear(brief.outfit) }
         if brief.initiative != lastBrief?.initiative {
-            // Para perguntar, ela precisa estar à vista: sai de baixo da borda.
-            if brief.initiative != nil, pet.hiddenAtHome {
-                pet.comeOut { [weak self] in self?.bubble.ask(brief.initiative) }
+            if let i = brief.initiative {
+                // Descansando, a pergunta espera ela acordar.
+                if !pet.resting { present(i) }
             } else {
-                bubble.ask(brief.initiative)
+                bubble.ask(nil)
             }
         }
         if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, !brief.sleeping, brief.mood != "focada" {
             let important = t.text.hasPrefix("Olha minha") || t.text.hasPrefix("Anotado") || t.text.hasPrefix("Modo ")
             pet.say(t.text, force: important)
+        }
+    }
+
+    /// Para perguntar, ela precisa estar à vista: sai de baixo da borda.
+    private func present(_ i: InitiativeData) {
+        if pet.hiddenAtHome {
+            pet.comeOut { [weak self] in self?.bubble.ask(i) }
+        } else {
+            bubble.ask(i)
         }
     }
 
@@ -221,6 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func suggestNow() { core.suggest() }
+    @objc private func putToBed() { pet.putToBed() }
 
     private func tasksChanged(_ tasks: [TaskItem]) {
         var finished: String?
@@ -331,6 +353,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         chat.keyEquivalentModifierMask = [.control, .option]
         chat.target = self
         menu.addItem(chat)
+        let bed = NSMenuItem(title: "Colocar para dormir", action: #selector(putToBed), keyEquivalent: "")
+        bed.target = self
+        menu.addItem(bed)
         let mind = NSMenuItem(title: "Mente da Faísca…", action: #selector(openMind), keyEquivalent: "")
         mind.target = self
         menu.addItem(mind)

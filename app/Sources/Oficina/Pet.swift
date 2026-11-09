@@ -123,6 +123,7 @@ final class PetFigure {
         defer { CATransaction.commit() }
 
         for l in [body, spark, leftEye, rightEye] { l.removeAllAnimations() }
+        snore(next == .sleeping)
         blinkTimer?.invalidate()
         blinkTimer = nil
         badge.isHidden = next != .waiting
@@ -326,6 +327,43 @@ final class PetFigure {
     func hush() {
         thought?.removeFromSuperlayer()
         thought = nil
+    }
+
+    private var zzz: CALayer?
+
+    /// Zzz subindo e sumindo enquanto dorme. Tudo no servidor de janelas.
+    private func snore(_ on: Bool) {
+        zzz?.removeFromSuperlayer()
+        zzz = nil
+        guard on else { return }
+        let group = CALayer()
+        group.frame = CGRect(x: w / 2 + 8, y: 60, width: 30, height: 40)
+        for i in 0..<3 {
+            let z = CATextLayer()
+            z.string = "z"
+            z.fontSize = CGFloat(10 + i * 3)
+            z.font = NSFont.systemFont(ofSize: 12, weight: .bold)
+            z.foregroundColor = NSColor(white: 1, alpha: 0.85).cgColor
+            z.alignmentMode = .center
+            z.frame = CGRect(x: 0, y: 0, width: 16, height: 18)
+            z.opacity = 0
+            let rise = CABasicAnimation(keyPath: "position")
+            rise.fromValue = NSValue(point: NSPoint(x: 6, y: 6))
+            rise.toValue = NSValue(point: NSPoint(x: 22, y: 36))
+            let fade = CAKeyframeAnimation(keyPath: "opacity")
+            fade.values = [0, 1, 1, 0]
+            fade.keyTimes = [0, 0.2, 0.7, 1]
+            let anim = CAAnimationGroup()
+            anim.animations = [rise, fade]
+            anim.duration = 2.4
+            anim.repeatCount = .infinity
+            anim.beginTime = CACurrentMediaTime() + Double(i) * 0.8
+            z.add(anim, forKey: "zzz")
+            group.addSublayer(z)
+        }
+        root.addSublayer(group)
+        crispen(group)
+        zzz = group
     }
 
     /// Giro de comemoração.
@@ -620,12 +658,19 @@ final class PetController {
     /// Abre ou fecha a casa na Dock (os ícones abrem espaço para ela).
     var setHomeOpen: (Bool) -> Void = { _ in }
     var onMoveStart: () -> Void = {}
+    /// Colocada na Dock: vai descansar (segundos de descanso).
+    var onRest: (Double) -> Void = { _ in }
+    /// Acordou de um descanso (sozinha ou cutucada).
+    var onWake: () -> Void = {}
+    private var restUntil = Date.distantPast
+    private var restTimer: Timer?
+    var resting: Bool { Date() < restUntil }
     var onMoveEnd: () -> Void = {}
     private var lastSaid = Date.distantPast
 
     /// Pensamento em voz alta, de vez em quando. Escondida em casa, fica quieta.
     func say(_ text: String, force: Bool = false) {
-        guard !hiddenAtHome, !busy() else { return }
+        guard !hiddenAtHome, !busy(), !resting else { return }
         guard force || Date().timeIntervalSince(lastSaid) > 90 else { return }
         lastSaid = Date()
         figure.say(text, left: screen.minX - origin.x, right: screen.maxX - origin.x)
@@ -807,7 +852,34 @@ final class PetController {
 
     private func refresh() {
         guard Date() >= celebrateUntil else { return }
-        set(taskMood ?? mindMood)
+        set(taskMood ?? (resting ? .sleeping : mindMood))
+    }
+
+    // MARK: Descanso
+
+    /// Fica em casa dormindo por um tempo: sem passeios nem conversa.
+    private func rest() {
+        let secs = Double.random(in: 600...900)
+        restUntil = Date().addingTimeInterval(secs)
+        figure.hush()
+        refresh()
+        onRest(secs)
+        restTimer?.invalidate()
+        let t = Timer(timeInterval: secs, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.wakeUp() }
+        }
+        t.tolerance = 10
+        RunLoop.main.add(t, forMode: .common)
+        restTimer = t
+    }
+
+    /// Acorda antes da hora (clique) ou quando o descanso acaba.
+    func wakeUp() {
+        guard restUntil > .distantPast else { return }
+        restTimer?.invalidate()
+        restUntil = .distantPast
+        refresh()
+        onWake()
     }
 
     private func set(_ mood: Mood) {
@@ -913,8 +985,27 @@ final class PetController {
         }
     }
 
+    /// "Colocar para dormir": vai para casa e descansa um pouco.
+    func putToBed() {
+        if home {
+            rest()
+        } else if let dock = dockFrame(), dockVisible(), dock.contains(NSPoint(x: frame.midX, y: frame.minY + 20)) {
+            enterHome(rest: true)
+        } else {
+            goHome()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.restWhenHome() }
+        }
+    }
+
+    private func restWhenHome(tries: Int = 40) {
+        if home { rest(); return }
+        guard tries > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.restWhenHome(tries: tries - 1) }
+    }
+
     /// A casa abre (os ícones abrem espaço) e ela pula para dentro.
-    private func enterHome() {
+    /// Colocada lá por você, vai descansar.
+    private func enterHome(rest: Bool = false) {
         moving = true
         setHomeOpen(true)
         // A Dock recalcula a largura no próximo ciclo; aí a casa tem lugar certo.
@@ -923,6 +1014,7 @@ final class PetController {
             self.place(target.origin, duration: 0.3, timing: .easeInEaseOut) {
                 self.moving = false
                 self.home = true
+                if rest { self.rest() }
             }
         }
     }
@@ -930,7 +1022,7 @@ final class PetController {
     /// Solta em cima da Dock: entra em casa. Fora dela: cai até o chão.
     private func dropped() {
         if let dock = dockFrame(), dockVisible(), dock.contains(NSPoint(x: frame.midX, y: frame.minY + 20)) {
-            enterHome()
+            enterHome(rest: true)
             return
         }
         home = false
@@ -1019,7 +1111,7 @@ final class PetController {
 
     /// Alguém abriu um app pela Dock: ela sai, corre até o ícone e volta.
     func appOpened(_ id: String) {
-        guard figure.mood != .sleeping, dockVisible(), iconX(id) != nil, !busy() else { return }
+        guard figure.mood != .sleeping, !resting, dockVisible(), iconX(id) != nil, !busy() else { return }
         let visit: () -> Void = { [weak self] in
             self?.reach(id, speed: 320) {
                 guard let self else { return }
@@ -1065,7 +1157,7 @@ final class PetController {
     /// Em casa, às vezes sai para passear. Fora, passeia e, depois de um
     /// tempo, volta. Curiosa ou entediada, vai mexer num ícone da Dock.
     private func wander() {
-        guard !moving, !busy(), [.idle, .curious, .bored, .lonely].contains(figure.mood), NSEvent.pressedMouseButtons == 0 else { return }
+        guard !moving, !busy(), !resting, [.idle, .curious, .bored, .lonely].contains(figure.mood), NSEvent.pressedMouseButtons == 0 else { return }
         let restless = figure.mood == .curious || figure.mood == .bored || figure.mood == .lonely
         if home {
             guard restless || Double.random(in: 0...1) < 0.35 else { return }

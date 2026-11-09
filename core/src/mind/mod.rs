@@ -48,6 +48,8 @@ pub struct MindEvent {
     pub idle: Option<f64>,
     #[serde(default)]
     pub running: Option<Vec<String>>,
+    #[serde(default)]
+    pub secs: Option<f64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -146,6 +148,8 @@ struct State {
     running_apps: Vec<String>,
     tasks: HashSet<String>,
     last_interaction: u64,
+    /// Colocada para descansar na Dock: dorme até aqui, mesmo com você por perto.
+    rest_until: u64,
     work_streak: f64,
     mood: String,
     thoughts: VecDeque<Thought>,
@@ -202,6 +206,7 @@ impl Mind {
                 running_apps: Vec::new(),
                 tasks: HashSet::new(),
                 last_interaction: now,
+                rest_until: 0,
                 work_streak: 0.0,
                 mood: "neutra".into(),
                 thoughts: VecDeque::new(),
@@ -267,6 +272,13 @@ impl Mind {
                     }
                 }
                 "dock_open" => pulse(&mut s, TROCA, 0.4),
+                "pet_rest" => {
+                    let secs = e.secs.unwrap_or(900.0).clamp(60.0, 3600.0) as u64;
+                    s.sleeping = true;
+                    s.rest_until = now + secs;
+                    s.last_interaction = now;
+                    think(&mut s, "Zzz… vou descansar um pouquinho.".into(), now);
+                }
                 _ => {}
             }
         }
@@ -367,7 +379,7 @@ impl Mind {
         if !s.sleeping && (s.energy < 0.1 || (idle > 900.0 && (input[NOITE] > 0.0 || tired > 0.5))) {
             s.sleeping = true;
             think(&mut s, "Vou tirar um cochilo…".into(), now);
-        } else if s.sleeping && present && s.energy > 0.25 {
+        } else if s.sleeping && present && s.energy > 0.25 && now >= s.rest_until {
             wake(&mut s);
         }
 
@@ -585,6 +597,7 @@ fn pulse(s: &mut State, ch: usize, amount: f32) {
 }
 
 fn wake(s: &mut State) {
+    s.rest_until = 0;
     if s.sleeping {
         s.sleeping = false;
         s.energy = s.energy.max(0.2);
@@ -773,7 +786,24 @@ mod tests {
     }
 
     fn ev(kind: &str) -> MindEvent {
-        MindEvent { kind: kind.into(), bundle: None, name: None, idle: None, running: None }
+        MindEvent { kind: kind.into(), bundle: None, name: None, idle: None, running: None, secs: None }
+    }
+
+    #[test]
+    fn descansar_na_dock_dorme_ate_a_hora_e_cutucar_acorda() {
+        let m = mind();
+        m.events(vec![MindEvent { secs: Some(600.0), ..ev("pet_rest") }]);
+        for _ in 0..6 {
+            m.state.lock().unwrap().last_tick = Instant::now() - std::time::Duration::from_millis(500);
+            m.tick();
+        }
+        // Com você presente e energia alta, ela continua dormindo.
+        assert!(m.state.lock().unwrap().energy > 0.25);
+        assert!(m.brief().sleeping);
+        assert_eq!(m.brief().mood, "dormindo");
+        m.events(vec![ev("pet_click")]);
+        m.tick();
+        assert!(!m.brief().sleeping);
     }
 
     #[test]
