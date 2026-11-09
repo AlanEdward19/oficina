@@ -181,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         defer { lastBrief = brief }
         pet.setMind(brief.mood, sleeping: brief.sleeping)
         if brief.outfit != lastBrief?.outfit { pet.wear(brief.outfit) }
+        if let d = brief.decor, d != lastBrief?.decor { pet.figure.setDecor(d) }
         if brief.initiative != lastBrief?.initiative {
             if let i = brief.initiative {
                 // Descansando, a pergunta espera ela acordar.

@@ -95,7 +95,7 @@ final class Core: ObservableObject {
                 problem = nil
                 loadUsage(fresh: false)
                 if let s = await mindSnapshot() {
-                    mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit)
+                    mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit, decor: s.decor)
                 }
                 try await listen()
             } catch {
@@ -244,6 +244,14 @@ final class Core: ObservableObject {
 
     func forgetMind() {
         Task { _ = await post("mind/forget") }
+    }
+
+    func createDecor(suggestion: String?) {
+        Task { _ = await post("mind/decor", json: ["suggestion": suggestion as Any]) }
+    }
+
+    func useDecor(_ id: String?) {
+        Task { _ = await post("mind/decor/use", json: ["id": id as Any]) }
     }
 
     func wear(_ id: String?) {

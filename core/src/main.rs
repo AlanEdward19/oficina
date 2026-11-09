@@ -154,6 +154,21 @@ async fn mind_forget(State(app): State<App>) -> StatusCode {
 }
 
 #[derive(Deserialize)]
+struct DecorWish {
+    suggestion: Option<String>,
+}
+
+async fn mind_decor(State(app): State<App>, Json(w): Json<DecorWish>) -> Response {
+    let wish = w.suggestion.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let theme = app.engine.mind.decor_theme();
+    (StatusCode::CREATED, Json(app.engine.create_decor(&theme, wish))).into_response()
+}
+
+async fn mind_decor_use(State(app): State<App>, Json(w): Json<Wear>) -> StatusCode {
+    if app.engine.mind.use_decor(w.id.as_deref()) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+#[derive(Deserialize)]
 struct Wear {
     id: Option<String>,
 }
@@ -219,6 +234,8 @@ async fn main() {
         .route("/v1/mind/suggest", post(mind_suggest))
         .route("/v1/mind/forget", post(mind_forget))
         .route("/v1/mind/outfit", post(mind_wear))
+        .route("/v1/mind/decor", post(mind_decor))
+        .route("/v1/mind/decor/use", post(mind_decor_use))
         .route("/v1/mind/initiatives/{id}/accept", post(initiative_accept))
         .route("/v1/mind/initiatives/{id}/decline", post(initiative_decline))
         .route("/v1/usage", get(usage))

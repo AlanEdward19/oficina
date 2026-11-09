@@ -1,6 +1,6 @@
 use crate::{
     config::{Config, Paths, Peer},
-    mind::{Action, Initiative, Mind, outfit},
+    mind::{Action, Initiative, Mind, decor, outfit},
     route::{self, CliEvent, Dest, Holdback},
     store::{Event, Status, Store, Target, Task},
     usage::{self, Scanner, Usage},
@@ -277,12 +277,41 @@ impl Engine {
                 let (me, theme) = (self.clone(), theme.clone());
                 tokio::spawn(async move { me.run_outfit(&task.id, &theme).await });
             }
+            Action::Decor { theme } => {
+                self.create_decor(theme, None);
+            }
             Action::Task { text, target } => {
                 let _ = self.submit(text, *target, None);
             }
             _ => {}
         }
         Some(initiative)
+    }
+
+    /// Cria uma casinha nova. Aparece no chat, porque gasta tokens.
+    pub fn create_decor(self: &Arc<Self>, theme: &str, suggestion: Option<String>) -> Task {
+        let label = suggestion.as_deref().unwrap_or(theme);
+        let task = self.store.create(format!("Decorar casinha: {label}"), Target::Chat, None);
+        let (me, id, theme) = (self.clone(), task.id.clone(), theme.to_string());
+        tokio::spawn(async move {
+            if !me.start(&id) {
+                return;
+            }
+            let result = match me.ask(&decor::prompt(&theme, suggestion.as_deref())).await {
+                Ok(text) => {
+                    let did = format!("d{:x}", usage::now());
+                    let theme = suggestion.clone().unwrap_or(theme.clone());
+                    decor::parse(&text, &theme, did, usage::now()).map(|d| {
+                        let name = d.name.clone();
+                        me.mind.add_decor(d);
+                        Some(format!("Pronto! Montei a casinha \"{name}\". Vou estrear na próxima soneca."))
+                    })
+                }
+                Err(e) => Err(e),
+            };
+            me.finish(&id, result);
+        });
+        task
     }
 
     /// Pede ao Claude as peças da roupinha; o app só desenha o que é válido.

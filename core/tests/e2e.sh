@@ -120,6 +120,12 @@ for _ in $(seq 1 40); do o=$(mind | py 'd["outfit"]["name"] if d.get("outfit") e
 equal 'veste a roupinha criada' 'AI Engineer' "$o"
 check 'tarefa visível no chat' 'Vesti a roupinha' "$(api http://127.0.0.1:7901/v1/tasks | py '[t["output"] for t in d if t["text"].startswith("Criar roupinha")]')"
 check 'pede ao Claude sem ferramentas' 'no-session-persistence' "$(grep -B0 -- '--tools  --setting-sources  --no-session' "$tmp/args.log" | tail -1)"
+check 'caminha padrão' 'padrao' "$(mind | py 'd["decor"]["id"]')"
+check 'sugerir casinha' 201 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"suggestion":"tema de praia"}' http://127.0.0.1:7901/v1/mind/decor)"
+for _ in $(seq 1 40); do dn=$(mind | py 'd["decor"]["name"]'); [ "$dn" = "Ninho de Praia" ] && break; sleep 0.1; done
+equal 'casinha criada e em uso' 'Ninho de Praia' "$dn"
+check 'pedido levou a sugestão' 'tema de praia' "$(api http://127.0.0.1:7901/v1/tasks | py '[t["text"] for t in d if t["text"].startswith("Decorar")]')"
+check 'voltar à caminha padrão' 204 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"id":null}' http://127.0.0.1:7901/v1/mind/decor/use)"
 check 'tirar a roupinha' 204 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"id":null}' http://127.0.0.1:7901/v1/mind/outfit)"
 check 'descansar na Dock' 204 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '[{"kind":"pet_rest","secs":600}]' http://127.0.0.1:7901/v1/mind/events)"
 equal 'dorme ao descansar' 'True' "$(mind | py 'd["sleeping"]')"

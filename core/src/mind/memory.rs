@@ -1,6 +1,7 @@
 //! O que a Faísca lembra: apps e horários, interesses, fatos ditos pelo
 //! usuário, roupinhas e o que já aprendeu. Fica só neste Mac.
 
+use super::decor::Decor;
 use super::outfit::Outfit;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -41,6 +42,8 @@ pub struct Memory {
     pub facts: Vec<Fact>,
     pub outfits: Vec<Outfit>,
     pub outfit: Option<String>,
+    pub decors: Vec<Decor>,
+    pub decor: Option<String>,
     pub researched: Vec<String>,
     pub bandit: HashMap<String, Bandit>,
     pub readout: Vec<f32>,

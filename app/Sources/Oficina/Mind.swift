@@ -20,6 +20,15 @@ struct OutfitData: Decodable, Equatable, Identifiable {
     let prop: String
 }
 
+struct DecorData: Decodable, Equatable, Identifiable {
+    let id: String
+    let name: String
+    let theme: String
+    let bed: OutfitPiece
+    let blanket: OutfitPiece
+    let extra: OutfitPiece
+}
+
 struct ThoughtData: Decodable, Equatable {
     let text: String
     let at: UInt64
@@ -48,6 +57,7 @@ struct MindBrief: Decodable, Equatable {
     let thought: ThoughtData?
     let initiative: InitiativeData?
     let outfit: OutfitData?
+    let decor: DecorData?
 }
 
 struct NamedValue: Decodable {
@@ -91,6 +101,8 @@ struct MindSnapshot: Decodable {
     let thoughts: [ThoughtData]
     let memory: MemoryData
     let outfits: [OutfitData]
+    let decor: DecorData?
+    let decors: [DecorData]?
 }
 
 private let driveLabels: [String: String] = [
@@ -222,6 +234,7 @@ struct MindView: View {
                     section("Pensamentos") { thoughts(s) }
                     section("O que ela lembra de você") { memory(s) }
                     section("Roupinhas") { outfits(s) }
+                    section("Casinha") { homes(s) }
                 }
                 .padding(18)
             } else {
@@ -377,6 +390,50 @@ struct MindView: View {
                 .controlSize(.small)
             }
         }
+    }
+
+    @State private var wish = ""
+
+    private func homes(_ s: MindSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Caminha fofinha (padrão)")
+                Spacer()
+                if s.decor?.id == "padrao" || s.decor == nil {
+                    Text("Em uso").foregroundStyle(.secondary)
+                } else {
+                    Button("Usar") { core.useDecor(nil) }
+                }
+            }
+            ForEach(s.decors ?? []) { d in
+                HStack {
+                    Text(d.name)
+                    Spacer()
+                    if s.decor?.id == d.id {
+                        Text("Em uso").foregroundStyle(.secondary)
+                    } else {
+                        Button("Usar") { core.useDecor(d.id) }
+                    }
+                }
+            }
+            HStack {
+                TextField("Sugira um tema (ex.: praia, pirata, espaço)", text: $wish)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(createHome)
+                Button("Criar", action: createHome)
+                    .disabled(wish.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            Text("Criar uma casinha gasta alguns tokens do Claude.").font(.caption).foregroundStyle(.secondary)
+        }
+        .font(.callout)
+        .controlSize(.small)
+    }
+
+    private func createHome() {
+        let text = wish.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        core.createDecor(suggestion: text)
+        wish = ""
     }
 
     private func minutes(_ m: Double) -> String {

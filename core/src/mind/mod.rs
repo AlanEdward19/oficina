@@ -1,6 +1,7 @@
 //! A mente da Faísca: sente o que acontece no Mac, passa pela rede de
 //! neurônios, cansa e dorme, pensa e, quando faz sentido, toma iniciativa.
 
+pub mod decor;
 pub mod memory;
 pub mod net;
 pub mod outfit;
@@ -9,6 +10,7 @@ use crate::store::{Event, Target};
 use crate::usage::now;
 use memory::{Fact, Memory, human_minutes, is_ai, is_work};
 use net::{INPUTS, MOTORS, N_IN, Net};
+use decor::Decor;
 use outfit::Outfit;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -59,6 +61,7 @@ pub enum Action {
     Chat,
     OpenApp { bundle: String, name: String },
     Outfit { theme: String },
+    Decor { theme: String },
     Task { text: String, target: Target },
 }
 
@@ -87,6 +90,8 @@ pub struct Brief {
     pub thought: Option<Thought>,
     pub initiative: Option<Initiative>,
     pub outfit: Option<Outfit>,
+    /// A caminha em uso (a padrão, se nenhuma foi criada).
+    pub decor: Decor,
 }
 
 #[derive(Serialize)]
@@ -128,6 +133,7 @@ pub struct Snapshot {
     pub thoughts: Vec<Thought>,
     pub memory: MemoryView,
     pub outfits: Vec<Outfit>,
+    pub decors: Vec<Decor>,
 }
 
 struct Focus {
@@ -515,6 +521,46 @@ impl Mind {
         self.publish();
     }
 
+    // MARK: Casinhas
+
+    pub fn add_decor(&self, decor: Decor) {
+        let now = now();
+        let mut s = self.state.lock().unwrap();
+        let name = decor.name.clone();
+        s.mem.decor = Some(decor.id.clone());
+        s.mem.decors.push(decor);
+        pulse(&mut s, SUCESSO, 1.0);
+        think(&mut s, format!("Casinha nova: {name}! Mal posso esperar para dormir."), now);
+        s.dirty = true;
+        drop(s);
+        self.flush();
+        self.publish();
+    }
+
+    /// `None` volta para a caminha padrão.
+    pub fn use_decor(&self, id: Option<&str>) -> bool {
+        let mut s = self.state.lock().unwrap();
+        if let Some(id) = id {
+            if !s.mem.decors.iter().any(|d| d.id == id) {
+                return false;
+            }
+        }
+        s.mem.decor = id.map(String::from);
+        s.dirty = true;
+        drop(s);
+        self.publish();
+        true
+    }
+
+    /// Tema para uma casinha nova: combina com a roupinha atual, se houver.
+    pub fn decor_theme(&self) -> String {
+        let s = self.state.lock().unwrap();
+        s.mem.outfit.as_ref()
+            .and_then(|id| s.mem.outfits.iter().find(|o| &o.id == id))
+            .map(|o| o.theme.clone())
+            .unwrap_or_else(|| "aconchegante".into())
+    }
+
     pub fn wear(&self, id: Option<&str>) -> bool {
         let mut s = self.state.lock().unwrap();
         if let Some(id) = id {
@@ -568,6 +614,7 @@ impl Mind {
                 peak: s.mem.peak_hours(),
             },
             outfits: s.mem.outfits.clone(),
+            decors: s.mem.decors.clone(),
         }
     }
 
@@ -575,12 +622,13 @@ impl Mind {
     fn publish(&self) {
         let brief = self.brief();
         let key = format!(
-            "{}|{}|{:?}|{:?}|{:?}",
+            "{}|{}|{:?}|{:?}|{:?}|{}",
             brief.mood,
             brief.sleeping,
             brief.thought.as_ref().map(|t| t.at),
             brief.initiative.as_ref().map(|i| &i.id),
-            brief.outfit.as_ref().map(|o| &o.id)
+            brief.outfit.as_ref().map(|o| &o.id),
+            brief.decor.id
         );
         let mut s = self.state.lock().unwrap();
         if s.last_brief == key {
@@ -682,6 +730,18 @@ fn best(s: &State, now: u64, forced: bool) -> Option<Candidate> {
             action: Action::Outfit { theme: "AI Engineer".into() },
         });
     }
+    if let Some(o) = mem.outfit.as_ref().and_then(|id| mem.outfits.iter().find(|o| &o.id == id)) {
+        if !mem.decors.iter().any(|d| d.theme == o.theme) {
+            c.push(Candidate {
+                kind: "decor".into(),
+                score: 0.8,
+                text: format!("Que tal uma caminha combinando com minha roupa de {}? Posso gastar uns tokens para criar?", o.theme),
+                accept: "Pode criar!",
+                decline: "Agora não",
+                action: Action::Decor { theme: o.theme.clone() },
+            });
+        }
+    }
     let focused = s.focus.as_ref().map(|f| f.bundle.as_str());
     for (bundle, stat) in &mem.apps {
         let at_hour = stat.hours.get(hour).copied().unwrap_or(0.0);
@@ -765,6 +825,10 @@ fn brief_of(s: &State) -> Brief {
         thought: s.thoughts.back().cloned(),
         initiative: s.initiative.clone(),
         outfit: s.mem.outfit.as_ref().and_then(|id| s.mem.outfits.iter().find(|o| &o.id == id)).cloned(),
+        decor: s.mem.decor.as_ref()
+            .and_then(|id| s.mem.decors.iter().find(|d| &d.id == id))
+            .cloned()
+            .unwrap_or_else(decor::default_decor),
     }
 }
 
@@ -849,6 +913,29 @@ mod tests {
         assert!(m.summary().contains("meu painel é de cozinha"));
         m.forget();
         assert!(!m.summary().contains("cozinha"));
+    }
+
+    #[test]
+    fn caminha_padrao_e_casinha_nova() {
+        let m = mind();
+        assert_eq!(m.brief().decor.id, "padrao");
+        let d = decor::parse(r##"{"name":"Praia","bed":{"shape":"basket","color":"#AA8844"}}"##, "praia", "d1".into(), 1).unwrap();
+        m.add_decor(d);
+        assert_eq!(m.brief().decor.name, "Praia");
+        assert!(m.use_decor(None));
+        assert_eq!(m.brief().decor.id, "padrao");
+        assert!(!m.use_decor(Some("nao-existe")));
+    }
+
+    #[test]
+    fn com_roupinha_propoe_casinha_combinando() {
+        let m = mind();
+        let o = outfit::parse(r##"{"name":"AI","head":{"shape":"cap","color":"#111111"}}"##, "AI Engineer", "o1".into(), 1).unwrap();
+        m.add_outfit(o);
+        let i = m.suggest().unwrap();
+        assert_eq!(i.kind, "decor");
+        assert!(matches!(i.action, Action::Decor { .. }));
+        assert_eq!(m.decor_theme(), "AI Engineer");
     }
 
     #[test]

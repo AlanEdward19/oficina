@@ -366,6 +366,187 @@ final class PetFigure {
         zzz = group
     }
 
+    // MARK: Caminha
+
+    private let bedBack = CALayer()
+    private let bedFront = CALayer()
+    private var decor: DecorData?
+
+    private func shade(_ hex: String, _ amount: CGFloat) -> CGColor {
+        let c = NSColor(cgColor: color(hex)) ?? .gray
+        return (amount < 0 ? c.blended(withFraction: -amount, of: .black) : c.blended(withFraction: amount, of: .white))?.cgColor ?? c.cgColor
+    }
+
+    /// Desenha a caminha: o fundo fica atrás dela; manta e borda, na frente.
+    func setDecor(_ d: DecorData) {
+        decor = d
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        if bedBack.superlayer == nil {
+            for l in [bedBack, bedFront] {
+                l.frame = bounds
+                l.opacity = 0
+                l.anchorPoint = CGPoint(x: 0.5, y: 0)
+                l.position = CGPoint(x: w / 2, y: 0)
+            }
+            root.insertSublayer(bedBack, below: body)
+            root.insertSublayer(bedFront, above: body)
+        }
+        bedBack.sublayers?.forEach { $0.removeFromSuperlayer() }
+        bedFront.sublayers?.forEach { $0.removeFromSuperlayer() }
+
+        func add(_ path: CGPath, _ fill: CGColor?, stroke: CGColor? = nil, width: CGFloat = 1.5, to parent: CALayer) {
+            let l = CAShapeLayer()
+            l.path = path
+            l.fillColor = fill
+            l.strokeColor = stroke
+            l.lineWidth = width
+            l.lineCap = .round
+            parent.addSublayer(l)
+        }
+        func rr(_ r: CGRect, _ radius: CGFloat) -> CGPath { CGPath(roundedRect: r, cornerWidth: radius, cornerHeight: radius, transform: nil) }
+        func poly(_ pts: [CGPoint]) -> CGPath { let p = CGMutablePath(); p.addLines(between: pts); p.closeSubpath(); return p }
+        let base = color(d.bed.color)
+        let dark = shade(d.bed.color, -0.28)
+        let light = shade(d.bed.color, 0.35)
+
+        // Enfeites que ficam atrás.
+        switch d.extra.shape {
+        case "pillow":
+            add(rr(CGRect(x: 4, y: 20, width: 28, height: 15), 7), color(d.extra.color), to: bedBack)
+        case "moon":
+            let m = CGMutablePath()
+            m.addEllipse(in: CGRect(x: 66, y: 58, width: 16, height: 16))
+            add(m, color(d.extra.color), to: bedBack)
+            add(CGPath(ellipseIn: CGRect(x: 71, y: 62, width: 14, height: 14), transform: nil), CGColor(gray: 0.1, alpha: 0.9), to: bedBack)
+        case "lamp":
+            add(rr(CGRect(x: 77, y: 0, width: 3, height: 30), 1.5), CGColor(gray: 0.35, alpha: 1), to: bedBack)
+            add(poly([CGPoint(x: 70, y: 28), CGPoint(x: 87, y: 28), CGPoint(x: 83, y: 40), CGPoint(x: 74, y: 40)]), color(d.extra.color), to: bedBack)
+        default: break
+        }
+
+        switch d.bed.shape {
+        case "basket":
+            add(poly([CGPoint(x: 0, y: 32), CGPoint(x: 84, y: 32), CGPoint(x: 78, y: 0), CGPoint(x: 6, y: 0)]), dark, to: bedBack)
+        case "nest":
+            add(CGPath(ellipseIn: CGRect(x: -4, y: -2, width: 92, height: 34), transform: nil), dark, to: bedBack)
+        case "cloud":
+            let c = CGMutablePath()
+            c.addEllipse(in: CGRect(x: 0, y: 6, width: 32, height: 26))
+            c.addEllipse(in: CGRect(x: 22, y: 10, width: 40, height: 30))
+            c.addEllipse(in: CGRect(x: 52, y: 6, width: 32, height: 26))
+            add(c, light, to: bedBack)
+        case "box":
+            add(rr(CGRect(x: 4, y: 0, width: 76, height: 34), 2), dark, to: bedBack)
+            add(poly([CGPoint(x: 4, y: 34), CGPoint(x: -8, y: 44), CGPoint(x: 18, y: 38)]), base, to: bedBack)
+            add(poly([CGPoint(x: 80, y: 34), CGPoint(x: 92, y: 44), CGPoint(x: 66, y: 38)]), base, to: bedBack)
+        default:
+            add(rr(CGRect(x: 0, y: 2, width: 84, height: 30), 15), dark, to: bedBack)
+        }
+
+        // Manta por cima dela, com o padrão recortado na forma da manta.
+        if d.blanket.shape != "none" {
+            let blanket = CALayer()
+            blanket.frame = CGRect(x: 14, y: 4, width: 56, height: 19)
+            blanket.cornerRadius = 7
+            blanket.masksToBounds = true
+            blanket.backgroundColor = color(d.blanket.color)
+            let pattern = shade(d.blanket.color, -0.3)
+            switch d.blanket.shape {
+            case "stripes":
+                for x in stride(from: CGFloat(3), to: 56, by: 9) {
+                    let s = CALayer()
+                    s.frame = CGRect(x: x, y: 0, width: 4, height: 19)
+                    s.backgroundColor = pattern
+                    blanket.addSublayer(s)
+                }
+            case "dots":
+                for (i, x) in stride(from: CGFloat(5), to: 54, by: 9).enumerated() {
+                    add(CGPath(ellipseIn: CGRect(x: x, y: i % 2 == 0 ? 4 : 11, width: 4, height: 4), transform: nil), pattern, to: blanket)
+                }
+            case "stars":
+                for (i, x) in stride(from: CGFloat(6), to: 54, by: 13).enumerated() {
+                    let cx = x, cy: CGFloat = i % 2 == 0 ? 7 : 13
+                    var pts: [CGPoint] = []
+                    for k in 0..<10 {
+                        let r: CGFloat = k % 2 == 0 ? 4 : 1.8
+                        let a = CGFloat(k) * .pi / 5 - .pi / 2
+                        pts.append(CGPoint(x: cx + r * cos(a), y: cy - r * sin(a)))
+                    }
+                    add(poly(pts), pattern, to: blanket)
+                }
+            default: break
+            }
+            bedFront.addSublayer(blanket)
+        }
+
+        // Borda da frente: é o que faz parecer que ela está dentro.
+        switch d.bed.shape {
+        case "basket":
+            add(poly([CGPoint(x: 3, y: 15), CGPoint(x: 81, y: 15), CGPoint(x: 77, y: -3), CGPoint(x: 7, y: -3)]), base, to: bedFront)
+            for y in [CGFloat(1), 6, 11] {
+                let p = CGMutablePath(); p.move(to: CGPoint(x: 6, y: y)); p.addLine(to: CGPoint(x: 78, y: y))
+                add(p, nil, stroke: dark, width: 1.2, to: bedFront)
+            }
+        case "nest":
+            add(CGPath(ellipseIn: CGRect(x: -2, y: -6, width: 88, height: 22), transform: nil), base, to: bedFront)
+            for i in 0..<9 {
+                let x = CGFloat(4 + i * 9)
+                let p = CGMutablePath(); p.move(to: CGPoint(x: x, y: 2 + CGFloat(i % 3) * 3)); p.addLine(to: CGPoint(x: x + 12, y: 6 + CGFloat((i + 1) % 3) * 3))
+                add(p, nil, stroke: dark, width: 1.4, to: bedFront)
+            }
+        case "cloud":
+            add(rr(CGRect(x: 0, y: -3, width: 84, height: 17), 8.5), base, to: bedFront)
+        case "box":
+            add(rr(CGRect(x: 4, y: -3, width: 76, height: 17), 2), base, to: bedFront)
+            add(rr(CGRect(x: 36, y: -3, width: 12, height: 17), 1), light, to: bedFront)
+        default:
+            add(rr(CGRect(x: 2, y: -3, width: 80, height: 17), 8.5), base, to: bedFront)
+            let shine = CGMutablePath(); shine.move(to: CGPoint(x: 12, y: 10)); shine.addLine(to: CGPoint(x: 72, y: 10))
+            add(shine, nil, stroke: light, width: 1.5, to: bedFront)
+        }
+
+        // Enfeites da frente.
+        switch d.extra.shape {
+        case "plant":
+            add(rr(CGRect(x: -4, y: -3, width: 12, height: 11), 2), CGColor(red: 0.72, green: 0.42, blue: 0.27, alpha: 1), to: bedFront)
+            for (dx, dy) in [(-4.0, 16.0), (2.0, 20.0), (7.0, 14.0)] {
+                add(CGPath(ellipseIn: CGRect(x: dx - 1, y: 6, width: 7, height: dy - 4), transform: nil), color(d.extra.color), to: bedFront)
+            }
+        case "bone":
+            add(rr(CGRect(x: 60, y: 6, width: 16, height: 4), 2), color(d.extra.color), to: bedFront)
+            for (x, y) in [(57.0, 3.0), (57.0, 8.0), (73.0, 3.0), (73.0, 8.0)] {
+                add(CGPath(ellipseIn: CGRect(x: x, y: y, width: 6, height: 6), transform: nil), color(d.extra.color), to: bedFront)
+            }
+        default: break
+        }
+        crispen(bedBack)
+        crispen(bedFront)
+    }
+
+    /// A caminha aparece (com um "pop") ou some.
+    func showBed(_ on: Bool, animated: Bool) {
+        if on, decor == nil { return }
+        for (i, l) in [bedBack, bedFront].enumerated() {
+            l.removeAnimation(forKey: "pop")
+            if on && animated {
+                let pop = CAKeyframeAnimation(keyPath: "transform.scale")
+                pop.values = [0.4, 1.12, 0.96, 1]
+                pop.keyTimes = [0, 0.55, 0.8, 1]
+                pop.duration = 0.45
+                pop.beginTime = CACurrentMediaTime() + Double(i) * 0.03
+                pop.fillMode = .backwards
+                l.add(pop, forKey: "pop")
+            }
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(animated ? 0.25 : 0)
+            CATransaction.setDisableActions(!animated)
+            l.opacity = on ? 1 : 0
+            CATransaction.commit()
+        }
+    }
+
     enum Pose { case out, home, bed }
     private(set) var pose: Pose = .out
     /// Tamanho em casa, para caber na Dock (definido pelo tamanho dos ícones).
@@ -374,6 +555,8 @@ final class PetFigure {
     /// Fora, tamanho normal. Em casa, menor. Na cama, menor e deitada.
     /// A escala parte da base dela, então os pés continuam no chão.
     func setPose(_ p: Pose, duration: Double) {
+        if p != .bed && pose == .bed { showBed(false, animated: duration > 0) }
+        if p == .bed && pose != .bed && bedFront.opacity == 0 { showBed(true, animated: duration > 0) }
         pose = p
         let s: CGFloat = p == .out ? 1 : homeScale
         let sx = p == .bed ? s * 1.1 : s
@@ -901,6 +1084,7 @@ final class PetController {
     }
 
     func celebrate(_ mood: Mood, seconds: Double) {
+        guard !resting else { return }
         celebrateUntil = Date().addingTimeInterval(seconds)
         set(mood)
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.05) { [weak self] in self?.refresh() }
@@ -908,7 +1092,8 @@ final class PetController {
 
     private func refresh() {
         guard Date() >= celebrateUntil else { return }
-        let mood = taskMood ?? (resting ? .sleeping : mindMood)
+        // Descansando, continua dormindo; tarefas seguem visíveis no notch e no chat.
+        let mood = resting ? .sleeping : (taskMood ?? mindMood)
         set(mood)
         // Em casa: deitada se dorme, sentadinha se não.
         if home {
@@ -927,6 +1112,8 @@ final class PetController {
         // Ainda acordada durante o ritual; depois deita e dorme.
         celebrateUntil = Date().addingTimeInterval(2.3)
         set(.idle)
+        // Primeiro ela coloca a caminha; depois se ajeita.
+        figure.showBed(true, animated: true)
         figure.curlUp { [weak self] in
             guard let self, self.resting, self.home else { return }
             self.figure.setPose(.bed, duration: 0.35)
@@ -1113,8 +1300,11 @@ final class PetController {
     // MARK: Chão e caminhada
 
     /// Onde ela fica de pé num dado x: em cima da Dock ou na base da tela.
+    /// Conta o corpo dela (não só o centro): se a ponta da Dock fica
+    /// embaixo dela, ela está em cima da Dock.
     private func floorY(_ centerX: CGFloat) -> CGFloat {
-        if let s = shelf(), s.x.contains(centerX) { return s.y - foot }
+        let half: CGFloat = 22
+        if let s = shelf(), centerX + half > s.x.lowerBound, centerX - half < s.x.upperBound { return s.y - foot }
         return screen.minY
     }
 
