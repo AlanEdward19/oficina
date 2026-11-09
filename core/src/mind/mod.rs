@@ -177,6 +177,9 @@ pub struct Mind {
     cooldown: u64,
 }
 
+#[cfg(test)]
+const TEST_HOUR: usize = 12;
+
 fn local_hour(ts: u64) -> usize {
     // SAFETY: `tm` é preenchida por localtime_r antes de ser lida.
     unsafe {
@@ -367,6 +370,9 @@ impl Mind {
         let idle = if silent > 180.0 { s.idle + silent } else { s.idle };
         let present = idle < PRESENT_IDLE;
         let hour = local_hour(now);
+        // Os testes não podem depender da hora em que rodam.
+        #[cfg(test)]
+        let hour = TEST_HOUR;
 
         let (working, ai) = match &s.focus {
             Some(f) if present => (is_work(&f.bundle, &f.name), is_ai(&f.bundle, &f.name)),
