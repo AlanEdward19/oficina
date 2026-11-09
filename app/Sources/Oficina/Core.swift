@@ -75,6 +75,13 @@ final class Core: ObservableObject {
     private let home = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Oficina")
     private var token = ""
+    /// Sessão própria, sem cache HTTP: tudo aqui é local e muda o tempo todo.
+    private let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.urlCache = nil
+        c.httpMaximumConnectionsPerHost = 2
+        return URLSession(configuration: c)
+    }()
     private var daemon: Process?
 
     func start() {
@@ -111,7 +118,7 @@ final class Core: ObservableObject {
     private func healthy() async -> Bool {
         var req = URLRequest(url: base.appendingPathComponent("health"))
         req.timeoutInterval = 1
-        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        guard let (_, resp) = try? await session.data(for: req) else { return false }
         return (resp as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -146,7 +153,7 @@ final class Core: ObservableObject {
     }
 
     private func refresh() async throws {
-        let (data, resp) = try await URLSession.shared.data(for: request("tasks"))
+        let (data, resp) = try await session.data(for: request("tasks"))
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.userAuthenticationRequired) }
         tasks = try JSONDecoder().decode([TaskItem].self, from: data)
     }
@@ -154,7 +161,7 @@ final class Core: ObservableObject {
     private func listen() async throws {
         var req = request("events")
         req.timeoutInterval = .infinity
-        let (bytes, _) = try await URLSession.shared.bytes(for: req)
+        let (bytes, _) = try await session.bytes(for: req)
         let decoder = JSONDecoder()
         for try await line in bytes.lines where line.hasPrefix("data:") {
             let json = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
@@ -191,7 +198,7 @@ final class Core: ObservableObject {
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text, "target": target])
         Task {
             do {
-                let (_, resp) = try await URLSession.shared.data(for: req)
+                let (_, resp) = try await session.data(for: req)
                 if (resp as? HTTPURLResponse)?.statusCode != 201 { problem = "O core recusou a mensagem." }
             } catch {
                 problem = "Sem contato com o core."
@@ -203,7 +210,7 @@ final class Core: ObservableObject {
     func loadUsage(fresh: Bool) {
         let req = fresh ? request("usage/refresh", method: "POST") : request("usage")
         Task {
-            guard let (data, _) = try? await URLSession.shared.data(for: req),
+            guard let (data, _) = try? await session.data(for: req),
                   let u = try? JSONDecoder().decode(UsageData.self, from: data) else { return }
             // Antes da primeira leitura o core responde vazio; não apaga nada.
             if usage == nil || !u.models.isEmpty || !u.limits.isEmpty { usage = u }
@@ -218,7 +225,7 @@ final class Core: ObservableObject {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: json)
         }
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+        guard let (data, resp) = try? await session.data(for: req),
               let code = (resp as? HTTPURLResponse)?.statusCode, code < 300 else { return nil }
         return data
     }
@@ -230,7 +237,7 @@ final class Core: ObservableObject {
     }
 
     func mindSnapshot() async -> MindSnapshot? {
-        guard let (data, _) = try? await URLSession.shared.data(for: request("mind")) else { return nil }
+        guard let (data, _) = try? await session.data(for: request("mind")) else { return nil }
         return try? JSONDecoder().decode(MindSnapshot.self, from: data)
     }
 
@@ -267,11 +274,11 @@ final class Core: ObservableObject {
     /// A próxima mensagem começa uma conversa nova no cérebro.
     func resetBrain() {
         let req = request("brain/reset", method: "POST")
-        Task { _ = try? await URLSession.shared.data(for: req) }
+        Task { _ = try? await session.data(for: req) }
     }
 
     func act(_ id: String, _ action: String) {
         let req = request("tasks/\(id)/\(action)", method: "POST")
-        Task { _ = try? await URLSession.shared.data(for: req) }
+        Task { _ = try? await session.data(for: req) }
     }
 }

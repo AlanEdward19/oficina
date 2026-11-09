@@ -338,6 +338,13 @@ impl Mind {
 
     // MARK: Ciclo
 
+    /// Dormindo ou com você longe, a mente pode pensar mais devagar.
+    pub fn calm(&self) -> bool {
+        let s = self.state.lock().unwrap();
+        let away = now().saturating_sub(s.present_at) > 180 || s.idle > 300.0;
+        (s.sleeping || away) && s.tasks.is_empty() && s.pulses.iter().all(|p| *p < 0.02)
+    }
+
     pub fn tick(&self) {
         let now = now();
         let mut s = self.state.lock().unwrap();

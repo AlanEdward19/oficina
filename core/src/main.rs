@@ -1,6 +1,7 @@
 mod config;
 mod engine;
 mod mind;
+mod peer;
 mod route;
 mod store;
 mod usage;
@@ -223,10 +224,11 @@ async fn main() {
     let mind_ref = engine.mind.clone();
     let ticking = engine.mind.clone();
     tokio::spawn(async move {
-        let mut every = tokio::time::interval(std::time::Duration::from_millis(500));
-        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // 1 s acordada; 3 s dormindo ou com você longe. A rede avança pelo
+        // tempo real, então o ritmo não muda o comportamento.
         loop {
-            every.tick().await;
+            let pause = if ticking.calm() { 3000 } else { 1000 };
+            tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
             ticking.tick();
         }
     });

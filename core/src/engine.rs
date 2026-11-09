@@ -1,5 +1,6 @@
 use crate::{
     config::{Config, Paths, Peer},
+    peer,
     mind::{Action, Initiative, Mind, decor, outfit},
     route::{self, CliEvent, Dest, Holdback},
     store::{Event, Status, Store, Target, Task},
@@ -43,7 +44,6 @@ pub struct Engine {
     brain: tokio::sync::Mutex<Option<String>>,
     local: Semaphore,
     running: Mutex<HashMap<String, i32>>,
-    http: reqwest::Client,
     usage: Mutex<Usage>,
     scanner: Arc<Mutex<Scanner>>,
     refreshing: AtomicBool,
@@ -169,10 +169,6 @@ impl Engine {
             brain: Default::default(),
             local,
             running: Default::default(),
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_millis(1500))
-                .build()
-                .expect("cliente HTTP"),
             usage: Default::default(),
             scanner: Arc::new(Mutex::new(Scanner::new(claude_projects()))),
             refreshing: AtomicBool::new(false),
@@ -725,7 +721,12 @@ impl Engine {
     async fn refresh_usage(&self, local: bool, limits: bool) {
         if local {
             let scanner = self.scanner.clone();
-            let scanned = tokio::task::spawn_blocking(move || scanner.lock().unwrap().scan()).await;
+            let scanned = tokio::task::spawn_blocking(move || {
+                let local = scanner.lock().unwrap().scan();
+                release_memory();
+                local
+            })
+            .await;
             if let Ok(scanned) = scanned {
                 let mut u = self.usage.lock().unwrap();
                 u.local = scanned;
@@ -787,12 +788,8 @@ impl Engine {
     }
 
     async fn peer_online(&self, peer: &Peer) -> bool {
-        self.http
-            .get(format!("{}/v1/health", peer.url))
-            .timeout(Duration::from_millis(1500))
-            .send()
-            .await
-            .is_ok_and(|r| r.status().is_success())
+        let url = format!("{}/v1/health", peer.url);
+        peer::call(&url, "GET", None, None, Duration::from_millis(1500)).await.is_ok_and(|r| r.ok())
     }
 
     /// Consulta sob demanda: nenhum ciclo de verificação fica rodando parado.
@@ -848,19 +845,15 @@ impl Engine {
         }
         self.store.update(id, |t| t.machine = Some(peer.name.clone()));
         let url = |path: String| format!("{}/v1/{path}", peer.url);
-        let sent = self
-            .http
-            .post(url("messages".into()))
-            .bearer_auth(&peer.token)
-            .json(&serde_json::json!({"text": prompt, "target": "machine", "machine": "local"}))
-            .send()
-            .await
-            .and_then(|r| r.error_for_status());
+        let wait = Duration::from_secs(10);
+        let body = serde_json::to_vec(&serde_json::json!({"text": prompt, "target": "machine", "machine": "local"})).unwrap_or_default();
+        let sent = peer::call(&url("messages".into()), "POST", Some(&peer.token), Some(&body), wait).await;
         let remote: Task = match sent {
-            Ok(r) => match r.json().await {
+            Ok(r) if r.ok() => match serde_json::from_slice(&r.body) {
                 Ok(t) => t,
                 Err(e) => return self.finish(id, Err(format!("Resposta inválida de {}: {e}", peer.name))),
             },
+            Ok(r) => return self.finish(id, Err(format!("{} recusou a tarefa (HTTP {}).", peer.name, r.status))),
             Err(e) => return self.finish(id, Err(format!("Falha ao falar com {}: {e}", peer.name))),
         };
 
@@ -870,19 +863,11 @@ impl Engine {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if self.store.get(id).is_some_and(|t| t.status == Status::Cancelled) {
-                let _ = self
-                    .http
-                    .post(format!("{task_url}/cancel"))
-                    .bearer_auth(&peer.token)
-                    .send()
-                    .await;
+                let _ = peer::call(&format!("{task_url}/cancel"), "POST", Some(&peer.token), None, wait).await;
                 return;
             }
-            let polled = self.http.get(&task_url).bearer_auth(&peer.token).send().await;
-            let t: Option<Task> = match polled {
-                Ok(r) => r.json().await.ok(),
-                Err(_) => None,
-            };
+            let polled = peer::call(&task_url, "GET", Some(&peer.token), None, wait).await;
+            let t: Option<Task> = polled.ok().filter(|r| r.ok()).and_then(|r| serde_json::from_slice(&r.body).ok());
             let Some(t) = t else {
                 failures += 1;
                 if failures >= 10 {
@@ -911,6 +896,16 @@ const CLOUD_SETUP: &str = "Falta configurar o Claude CLI para a nuvem. No termin
 ~/Library/Application Support/Oficina/workspace, rode claude, escolha o tema, confirme a pasta e saia com /exit.";
 
 const GRACE: Duration = Duration::from_secs(2);
+
+unsafe extern "C" {
+    fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t) -> libc::size_t;
+}
+
+/// Ler 1 GB de logs deixa buffers livres retidos pelo alocador; devolve ao sistema.
+fn release_memory() {
+    // SAFETY: zona nula = todas as zonas; objetivo 0 = liberar o que puder.
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+}
 
 fn signal_group(pid: i32, sig: i32) {
     // SAFETY: `pid` lidera um grupo criado por nós (`process_group(0)`).

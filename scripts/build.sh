@@ -11,7 +11,8 @@ rm -rf "$root/build/Oficina.app"
 mkdir -p "$out/MacOS"
 cp "$root/app/.build/release/Oficina" "$out/MacOS/Oficina"
 cp "$root/core/target/release/oficinad" "$out/MacOS/oficinad"
-strip -x "$out/MacOS/Oficina" 2>/dev/null || true
+strip "$out/MacOS/Oficina" 2>/dev/null || true
+strip "$out/MacOS/oficinad" 2>/dev/null || true
 
 cat > "$out/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>

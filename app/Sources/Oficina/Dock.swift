@@ -48,7 +48,9 @@ final class DockStore: ObservableObject {
     @Published private(set) var active: Int
     @Published private(set) var runningIDs: [String] = []
     @Published var usage: UsageData?
-    @Published var look = DockLook()
+    @Published var look = DockLook() {
+        didSet { if look.tile != oldValue.tile || look.magnify != oldValue.magnify { icons.removeAll() } }
+    }
     @Published var nudged: String?
     /// A casa da Faísca abre só quando ela está (ou está chegando) em casa.
     @Published var homeOpen = true
@@ -127,9 +129,29 @@ final class DockStore: ObservableObject {
         } else {
             image = NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil) ?? NSImage()
         }
-        image.size = NSSize(width: 128, height: 128)
-        icons[id] = image
-        return image
+        let small = rasterize(image, points: look.tile * look.magnify)
+        icons[id] = small
+        return small
+    }
+
+    /// Os ícones do sistema trazem versões de até 1024 px. Guarda só um
+    /// bitmap do tamanho em que o ícone aparece (ampliado, se houver ampliação).
+    private func rasterize(_ image: NSImage, points: CGFloat) -> NSImage {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let px = Int((points * scale).rounded())
+        guard px > 0, let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { return image }
+        rep.size = NSSize(width: points, height: points)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image.draw(in: NSRect(x: 0, y: 0, width: points, height: points), from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        let out = NSImage(size: rep.size)
+        out.addRepresentation(rep)
+        return out
     }
 
     func name(_ id: String) -> String {
@@ -706,6 +728,9 @@ final class DockController {
     private var watch: Timer?
     private var frames: [String: CGRect] = [:]
     private var bag = Set<AnyCancellable>()
+    /// Algo que segura a Dock aberta (ex.: a Faísca sendo arrastada ou em cima dela).
+    var keepOpen: () -> Bool = { false }
+
     /// Avisa para onde a Dock vai (quadro final), em quanto tempo e com que curva.
     var onLayout: (NSRect, Double, CAMediaTimingFunction?) -> Void = { _, _, _ in }
 
@@ -943,6 +968,12 @@ final class DockController {
         pendingReveal = t
     }
 
+    /// Abre na hora, sem o atraso (ex.: arrastando a Faísca até a borda).
+    func revealNow() {
+        pendingReveal?.invalidate()
+        reveal()
+    }
+
     private func reveal() {
         guard store.look.autohide, !shown else { return }
         shown = true
@@ -967,7 +998,9 @@ final class DockController {
             watch?.invalidate()
             return
         }
-        if hotZone.contains(NSEvent.mouseLocation) { return }
+        // Com o botão pressionado (clique ou arraste) ou com a Faísca em cima
+        // da Dock, ela não some.
+        if hotZone.contains(NSEvent.mouseLocation) || NSEvent.pressedMouseButtons != 0 || keepOpen() { return }
         // Mouse fora: some na hora, como a Dock do macOS.
         watch?.invalidate()
         shown = false

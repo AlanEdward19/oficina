@@ -124,6 +124,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.pet.dockMoved(home: self.dock.petHome(for: target), duration: duration, curve: curve)
         }
         pet.onMoveStart = { [weak self] in self?.bubble.hideForMove() }
+        pet.nearDock = { [weak self] in self?.dock.revealNow() }
+        dock.keepOpen = { [weak self] in
+            guard let pet = self?.pet else { return false }
+            return pet.dragging || pet.holdsDock
+        }
         pet.onRest = { [weak self] secs in self?.core.mindEvents([["kind": "pet_rest", "secs": secs]]) }
         // Ao acordar, se ainda houver uma pergunta guardada, ela faz agora.
         pet.onWake = { [weak self] in
@@ -304,10 +309,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var clickMonitors: [Any] = []
 
+    private var releaseChat: DispatchWorkItem?
+
     private func hidePanel() {
         panel.orderOut(nil)
         clickMonitors.forEach(NSEvent.removeMonitor)
         clickMonitors = []
+        // Fechada por um minuto, a tela da conversa sai da memória.
+        releaseChat?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.panel.isVisible else { return }
+            self.panel.contentView = nil
+        }
+        releaseChat = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
+    }
+
+    /// A tela da conversa só existe enquanto é usada.
+    private func ensureChatView() {
+        releaseChat?.cancel()
+        guard panel.contentView == nil || !(panel.contentView is NSHostingView<ChatView>) else { return }
+        let host = NSHostingView(rootView: ChatView(core: core) { [weak self] in self?.hidePanel() })
+        host.wantsLayer = true
+        host.layer?.cornerRadius = 16
+        host.layer?.masksToBounds = true
+        panel.contentView = host
     }
 
     /// Fecha a conversa quando o clique acontece fora dela. Os monitores só
@@ -346,11 +372,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.level = .floating
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let host = NSHostingView(rootView: ChatView(core: core) { [weak self] in self?.hidePanel() })
-        host.wantsLayer = true
-        host.layer?.cornerRadius = 16
-        host.layer?.masksToBounds = true
-        panel.contentView = host
         // Trocar de app pelo teclado também fecha.
         NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification, object: panel, queue: .main
@@ -364,6 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hidePanel()
             return
         }
+        ensureChatView()
         let pf = pet.frame
         let screen = NSScreen.screens.first?.visibleFrame ?? NSScreen.main?.visibleFrame ?? pf
         var x = pf.midX - panel.frame.width / 2

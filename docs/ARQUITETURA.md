@@ -13,16 +13,23 @@
 
 ## Medições (M1 Pro, 16 GB)
 
-Memória em *physical footprint*, a métrica do Monitor de Atividade, com pet e notch ligados.
+Memória em *physical footprint* (a métrica do Monitor de Atividade), com pet, notch e Dock ligados e o uso
+do Claude já lido.
 
 | | Disco | Memória | CPU parado |
 |---|---|---|---|
-| `oficinad` | 1,2 MB | 16 MB depois de ler o uso (1,4 MB antes) | 0% |
-| `Oficina.app` (pet, notch e Dock) | 600 KB + core | 27 MB | 0,1% |
+| `oficinad` | 1,1 MB (54 crates) | 6,9 MB | 0,02% |
+| `Oficina.app` | 840 KB + core | 22 MB | 0,03% a 0,3% (passeios) |
 | Vorssaint, para comparar | | 143 MB | não medido |
 
-A comparação ainda não é entre iguais: o Vorssaint faz muito mais coisas. O custo real aparece com o
-`claude` rodando, só enquanto há tarefa.
+O que segura esses números:
+
+- O core fala com outras máquinas por um cliente HTTP mínimo próprio (`peer.rs`), sem `reqwest`.
+- Os logs de uso são lidos em pedaços fixos; linhas acima de 1 MB (imagens, resultados longos) são
+  descartadas sem ir para a memória, e o alocador devolve o que sobra.
+- A mente pensa a cada 1 s acordada e a cada 3 s dormindo ou com você longe.
+- Ícones da Dock são guardados como bitmaps do tamanho exibido; a tela da conversa só existe enquanto é usada.
+- Faísca e Dock animam por Core Animation; a janela da Dock nunca se move.
 
 ## Contrato do core
 

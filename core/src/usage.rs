@@ -189,21 +189,52 @@ impl Scanner {
         }
     }
 
+    /// Lê em pedaços de tamanho fixo. Linhas enormes (imagens coladas,
+    /// resultados longos de ferramentas) nunca são respostas com contagem de
+    /// tokens: são descartadas sem ir para a memória.
     fn read_from(&mut self, path: &Path, offset: u64) -> std::io::Result<u64> {
+        const MAX_LINE: usize = 1024 * 1024;
         let mut file = fs::File::open(path)?;
         file.seek(SeekFrom::Start(offset))?;
-        let mut reader = BufReader::with_capacity(128 * 1024, file);
-        let mut line = Vec::new();
+        let mut reader = BufReader::with_capacity(64 * 1024, file);
+        let mut line: Vec<u8> = Vec::with_capacity(16 * 1024);
+        let mut too_long = false;
         let mut pos = offset;
+        let mut pending = 0u64;
         loop {
-            line.clear();
-            let n = reader.read_until(b'\n', &mut line)?;
-            // Linha sem \n ainda está sendo escrita: fica para a próxima.
-            if n == 0 || line.last() != Some(&b'\n') {
+            let chunk = reader.fill_buf()?;
+            if chunk.is_empty() {
                 break;
             }
-            pos += n as u64;
-            self.ingest(&line);
+            let (part, done) = match chunk.iter().position(|b| *b == b'\n') {
+                Some(i) => (&chunk[..=i], true),
+                None => (chunk, false),
+            };
+            let used = part.len();
+            if !too_long {
+                if line.len() + used > MAX_LINE {
+                    too_long = true;
+                    line.clear();
+                } else {
+                    line.extend_from_slice(part);
+                }
+            }
+            reader.consume(used);
+            pending += used as u64;
+            if done {
+                if !too_long {
+                    self.ingest(&line);
+                }
+                // Só avança o ponto de leitura em linha completa: uma linha
+                // ainda sendo escrita fica para a próxima vez.
+                pos += pending;
+                pending = 0;
+                line.clear();
+                too_long = false;
+                if line.capacity() > 256 * 1024 {
+                    line.shrink_to(16 * 1024);
+                }
+            }
         }
         Ok(pos)
     }

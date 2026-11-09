@@ -902,6 +902,15 @@ final class PetController {
     /// Tamanho dela em casa, conforme o tamanho dos ícones da Dock.
     var homeScale: () -> CGFloat = { 0.7 }
     var onMoveEnd: () -> Void = {}
+    /// Arrastada até perto da borda de baixo: pede para a Dock abrir.
+    var nearDock: () -> Void = {}
+    private(set) var dragging = false
+
+    /// Está em cima da Dock (em casa ou na barra) com o mouse sobre ela.
+    var holdsDock: Bool {
+        guard frame.contains(NSEvent.mouseLocation) else { return false }
+        return home || (shelf().map { abs(origin.y - ($0.y - foot)) < 2 } ?? false)
+    }
     private var lastSaid = Date.distantPast
 
     /// Pensamento em voz alta, de vez em quando. Escondida em casa, fica quieta.
@@ -959,14 +968,23 @@ final class PetController {
         view.onDragStart = { [weak self] in
             guard let self else { return }
             self.interrupt()
+            self.dragging = true
             self.home = false
             self.restTimer?.invalidate()
             self.restUntil = .distantPast
             self.figure.setPose(.out, duration: 0.15)
             self.onEvent("pet_drag")
         }
-        view.onDrag = { [weak self] p in self?.follow(p) }
-        view.onDrop = { [weak self] in self?.dropped() }
+        view.onDrag = { [weak self] p in
+            guard let self else { return }
+            self.follow(p)
+            // Perto da borda de baixo, a Dock recolhida abre para receber a Faísca.
+            if !self.dockVisible(), NSEvent.mouseLocation.y < self.screen.minY + 60 { self.nearDock() }
+        }
+        view.onDrop = { [weak self] in
+            self?.dragging = false
+            self?.dropped()
+        }
         view.onPetted = { [weak self] in
             self?.figure.bliss()
             self?.celebrate(.happy, seconds: 1.6)
