@@ -18,13 +18,14 @@ do Claude já lido.
 
 | | Disco | Memória | CPU parado |
 |---|---|---|---|
-| `oficinad` | 1,1 MB (54 crates) | 6,9 MB | 0,02% |
-| `Oficina.app` | 840 KB + core | 22 MB | 0,03% a 0,3% (passeios) |
+| `oficinad` | 1,1 MB (54 crates) | 3,6 MB | 0,02% |
+| `Oficina.app` | 920 KB + core | 22 MB | 0,03% (sobe um pouco nos passeios) |
 | Vorssaint, para comparar | | 143 MB | não medido |
 
 O que segura esses números:
 
 - O core fala com outras máquinas por um cliente HTTP mínimo próprio (`peer.rs`), sem `reqwest`.
+- O uso guarda só totais por hora e modelo, não uma entrada por resposta.
 - Os logs de uso são lidos em pedaços fixos; linhas acima de 1 MB (imagens, resultados longos) são
   descartadas sem ir para a memória, e o alocador devolve o que sobra.
 - A mente pensa a cada 1 s acordada e a cada 3 s dormindo ou com você longe.
@@ -43,7 +44,15 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 | `GET /v1/tasks`, `GET /v1/tasks/{id}` | Estado |
 | `POST /v1/tasks/{id}/approve`, `/cancel` | Aprovar ou cancelar |
 | `GET /v1/usage`, `POST /v1/usage/refresh` | Limites e tokens; responde na hora e atualiza em segundo plano |
+| `GET/POST /v1/conversations`, `GET/DELETE /v1/conversations/{id}`, `POST …/rename` | Conversas e histórico |
 | `GET /v1/events` | SSE com `{kind: task\|delta\|usage\|resync}` |
+
+## Conversas
+
+- Cada conversa é uma sessão do Claude Code (o cérebro roda com `--resume` da sessão da conversa), então dá
+  para continuar no Claude Code: o chat copia o comando. Cada conversa tem sua própria fila no core.
+- O histórico completo fica na Oficina: as mensagens recentes em `state.json`; as que saem da memória vão
+  para `conversas/<id>.jsonl`, com cartões e links. Apagar uma conversa não apaga a sessão no Claude Code.
 
 ## Uso do Claude
 

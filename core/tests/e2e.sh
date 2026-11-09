@@ -46,7 +46,9 @@ check 'vazia recusada' 400 "$(api -o /dev/null -w '%{http_code}' -X POST -d '{"t
 echo 'conversa'
 id=$(send '{"text":"olá"}'); check 'termina' done "$(wait_for "$id" done\ failed)"
 check 'responde' 'eco: olá' "$(get "$id" output)"
-id=$(send '{"text":"de novo"}'); wait_for "$id" done >/dev/null
+conv=$(get "$id" conversation)
+id=$(send "{\"text\":\"de novo\",\"conversation\":\"$conv\"}"); wait_for "$id" done >/dev/null
+again=$id
 check 'retoma a sessão' '--resume sess-1' "$(tail -2 "$tmp/args.log" | head -2)"
 check 'sem ferramentas' '--tools  --setting-sources' "$(tail -1 "$tmp/args.log")"
 id=$(send '{"text":"erro"}'); check 'erro vira falha' failed "$(wait_for "$id" failed\ done)"
@@ -55,6 +57,20 @@ check 'mostra o erro' 'Please run /login' "$(get "$id" error)"
 check 'nova conversa' 204 "$(api -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7901/v1/brain/reset)"
 id=$(send '{"text":"depois do reset"}'); wait_for "$id" done >/dev/null
 equal 'começa sem retomar' 0 "$(tail -1 "$tmp/args.log" | grep -c -- '--resume')"
+
+echo 'conversas'
+check 'mesma conversa' "$conv" "$(get "$again" conversation)"
+other=$(send '{"text":"assunto novo"}'); wait_for "$other" done >/dev/null
+equal 'conversa nova começa sem retomar' 0 "$(tail -1 "$tmp/args.log" | grep -c -- '--resume')"
+convs=$(api http://127.0.0.1:7901/v1/conversations)
+check 'lista com título da primeira mensagem' '"title":"olá"' "$convs"
+check 'mais recente primeiro' "$(get "$other" conversation)" "$(echo "$convs" | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])')"
+check 'sessão do Claude guardada' '"session":"sess-1"' "$convs"
+hist=$(api "http://127.0.0.1:7901/v1/conversations/$conv")
+equal 'histórico da conversa' 2 "$(echo "$hist" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["tasks"]))')"
+check 'renomear' 204 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"title":"Painel da cozinha"}' "http://127.0.0.1:7901/v1/conversations/$conv/rename")"
+check 'apagar conversa' 204 "$(api -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:7901/v1/conversations/$(get "$other" conversation)")"
+check 'id inválido recusado' 404 "$(api -o /dev/null -w '%{http_code}' 'http://127.0.0.1:7901/v1/conversations/..%2Fstate')"
 
 echo 'delegação'
 id=$(send '{"text":"delegar-nuvem"}'); check 'nuvem termina' done "$(wait_for "$id" done\ failed)"

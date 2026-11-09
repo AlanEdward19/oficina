@@ -361,7 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildPanel() {
         panel = KeyPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 580),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 580),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: true

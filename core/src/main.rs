@@ -1,4 +1,5 @@
 mod config;
+mod conv;
 mod engine;
 mod mind;
 mod peer;
@@ -39,6 +40,7 @@ struct Message {
     #[serde(default = "auto")]
     target: Target,
     machine: Option<String>,
+    conversation: Option<String>,
 }
 
 fn auto() -> Target {
@@ -82,7 +84,7 @@ async fn machines(State(app): State<App>) -> impl IntoResponse {
 }
 
 async fn create(State(app): State<App>, Json(m): Json<Message>) -> Response {
-    match app.engine.submit(&m.text, m.target, m.machine) {
+    match app.engine.submit(&m.text, m.target, m.machine, m.conversation) {
         Ok(task) => (StatusCode::CREATED, Json(task)).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
@@ -193,6 +195,45 @@ async fn mind_wear(State(app): State<App>, Json(w): Json<Wear>) -> StatusCode {
     if app.engine.mind.wear(w.id.as_deref()) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
 }
 
+async fn conversations(State(app): State<App>) -> impl IntoResponse {
+    Json(app.engine.convs.list())
+}
+
+#[derive(Deserialize)]
+struct NewConversation {
+    title: Option<String>,
+}
+
+async fn conversation_create(State(app): State<App>, Json(n): Json<NewConversation>) -> Response {
+    (StatusCode::CREATED, Json(app.engine.convs.create(n.title.as_deref(), None))).into_response()
+}
+
+async fn conversation(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.convs.get(&id) {
+        Some(c) if conv::valid_id(&id) => {
+            Json(serde_json::json!({ "conversation": c, "tasks": app.engine.store.history(&id) })).into_response()
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct Rename {
+    title: String,
+}
+
+async fn conversation_rename(State(app): State<App>, Path(id): Path<String>, Json(r): Json<Rename>) -> StatusCode {
+    if app.engine.convs.rename(&id, &r.title) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+async fn conversation_delete(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if !conv::valid_id(&id) || !app.engine.convs.delete(&id) {
+        return StatusCode::NOT_FOUND;
+    }
+    app.engine.store.forget_conversation(&id);
+    StatusCode::NO_CONTENT
+}
+
 async fn brain_reset(State(app): State<App>) -> StatusCode {
     app.engine.reset_brain().await;
     StatusCode::NO_CONTENT
@@ -218,7 +259,7 @@ async fn main() {
     let paths = config::Paths::resolve();
     let (cfg, token) = config::load(&paths).expect("não consegui carregar a configuração");
     let listen = cfg.listen.clone();
-    let store = store::Store::open(paths.state());
+    let store = store::Store::open(paths.state(), paths.home.join("conversas"));
     tokio::spawn(store.clone().persist_loop());
     let engine = Engine::new(store.clone(), cfg, paths);
     let mind_ref = engine.mind.clone();
@@ -246,6 +287,9 @@ async fn main() {
         .route("/v1/tasks/{id}/cancel", post(cancel))
         .route("/v1/events", get(events))
         .route("/v1/brain/reset", post(brain_reset))
+        .route("/v1/conversations", get(conversations).post(conversation_create))
+        .route("/v1/conversations/{id}", get(conversation).delete(conversation_delete))
+        .route("/v1/conversations/{id}/rename", post(conversation_rename))
         .route("/v1/requests", post(create_request))
         .route("/v1/mind", get(mind))
         .route("/v1/mind/events", post(mind_events))

@@ -5,6 +5,7 @@ struct TaskItem: Identifiable, Decodable, Equatable {
     let text: String
     var target: String
     var machine: String?
+    var conversation: String?
     var kind: String?
     var prompt: String?
     var status: String
@@ -14,7 +15,7 @@ struct TaskItem: Identifiable, Decodable, Equatable {
     let createdAt: UInt64
 
     enum CodingKeys: String, CodingKey {
-        case id, text, target, machine, kind, prompt, status, output, url, error
+        case id, text, target, machine, conversation, kind, prompt, status, output, url, error
         case createdAt = "created_at"
     }
 
@@ -53,6 +54,25 @@ struct UsageData: Decodable, Equatable {
     }
 }
 
+struct ConversationItem: Decodable, Identifiable, Equatable {
+    let id: String
+    let title: String
+    let session: String?
+    let createdAt: UInt64
+    let updatedAt: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, session
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+private struct ConversationDetail: Decodable {
+    let conversation: ConversationItem
+    let tasks: [TaskItem]
+}
+
 private struct CoreEvent: Decodable {
     let kind: String
     let task: TaskItem?
@@ -67,6 +87,19 @@ private struct CoreEvent: Decodable {
 final class Core: ObservableObject {
     @Published private(set) var tasks: [TaskItem] = []
     @Published private(set) var usage: UsageData?
+    @Published private(set) var conversations: [ConversationItem] = []
+    /// Conversa aberta no chat (nil = nova, ainda sem mensagens).
+    @Published private(set) var current: String? = UserDefaults.standard.string(forKey: "conversaAtual")
+    /// Mensagens antigas da conversa aberta (as recentes vêm de `tasks`).
+    @Published private(set) var history: [TaskItem] = []
+
+    /// A conversa aberta: arquivo + o que está vivo, em ordem.
+    var thread: [TaskItem] {
+        guard let current else { return [] }
+        let live = tasks.filter { $0.conversation == current }
+        let ids = Set(live.map(\.id))
+        return (history.filter { !ids.contains($0.id) } + live).sorted { $0.createdAt < $1.createdAt }
+    }
     @Published private(set) var mind: MindBrief?
     @Published private(set) var connected = false
     @Published private(set) var problem: String?
@@ -102,6 +135,7 @@ final class Core: ObservableObject {
                 connected = true
                 problem = nil
                 loadUsage(fresh: false)
+                loadConversations()
                 if let s = await mindSnapshot() {
                     mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit, decor: s.decor)
                 }
@@ -178,6 +212,8 @@ final class Core: ObservableObject {
                 tasks[i] = t
             } else {
                 tasks.append(t)
+                // Mensagem nova (inclusive da própria Faísca): a lista se reordena.
+                loadConversations()
             }
         case "usage":
             if let u = ev.usage { usage = u }
@@ -195,14 +231,85 @@ final class Core: ObservableObject {
     func send(_ text: String, target: String) {
         var req = request("messages", method: "POST")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text, "target": target])
+        var body: [String: Any] = ["text": text, "target": target]
+        if let current { body["conversation"] = current }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         Task {
             do {
-                let (_, resp) = try await session.data(for: req)
-                if (resp as? HTTPURLResponse)?.statusCode != 201 { problem = "O core recusou a mensagem." }
+                let (data, resp) = try await session.data(for: req)
+                guard (resp as? HTTPURLResponse)?.statusCode == 201 else {
+                    problem = "O core recusou a mensagem."
+                    return
+                }
+                // Primeira mensagem de uma conversa nova: o core criou a conversa.
+                if let t = try? JSONDecoder().decode(TaskItem.self, from: data), let conv = t.conversation, conv != current {
+                    setCurrent(conv)
+                }
+                loadConversations()
             } catch {
                 problem = "Sem contato com o core."
             }
+        }
+    }
+
+    // MARK: Conversas
+
+    private func setCurrent(_ id: String?) {
+        current = id
+        UserDefaults.standard.set(id, forKey: "conversaAtual")
+    }
+
+    func loadConversations() {
+        Task {
+            guard let (data, _) = try? await session.data(for: request("conversations")),
+                  let list = try? JSONDecoder().decode([ConversationItem].self, from: data) else { return }
+            conversations = list
+            if let c = current, !list.contains(where: { $0.id == c }) {
+                setCurrent(nil)
+                history = []
+            } else if history.isEmpty, let c = current {
+                loadHistory(c)
+            }
+        }
+    }
+
+    private func loadHistory(_ id: String) {
+        Task {
+            guard let (data, _) = try? await session.data(for: request("conversations/\(id)")),
+                  let d = try? JSONDecoder().decode(ConversationDetail.self, from: data), current == id else { return }
+            history = d.tasks
+        }
+    }
+
+    func select(_ id: String) {
+        guard id != current else { return }
+        setCurrent(id)
+        history = []
+        loadHistory(id)
+    }
+
+    /// Começa uma conversa nova; ela passa a existir com a primeira mensagem.
+    func newConversation() {
+        setCurrent(nil)
+        history = []
+    }
+
+    func renameConversation(_ id: String, _ title: String) {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        Task {
+            _ = await post("conversations/\(id)/rename", json: ["title": t])
+            loadConversations()
+        }
+    }
+
+    func deleteConversation(_ id: String) {
+        var req = request("conversations/\(id)", method: "DELETE")
+        req.timeoutInterval = 10
+        Task {
+            _ = try? await session.data(for: req)
+            if current == id { newConversation() }
+            loadConversations()
         }
     }
 
@@ -269,12 +376,6 @@ final class Core: ObservableObject {
 
     func wear(_ id: String?) {
         Task { _ = await post("mind/outfit", json: ["id": id as Any]) }
-    }
-
-    /// A próxima mensagem começa uma conversa nova no cérebro.
-    func resetBrain() {
-        let req = request("brain/reset", method: "POST")
-        Task { _ = try? await session.data(for: req) }
     }
 
     func act(_ id: String, _ action: String) {

@@ -1,5 +1,6 @@
 use crate::{
     config::{Config, Paths, Peer},
+    conv::Conversations,
     peer,
     mind::{Action, Initiative, Mind, decor, outfit},
     route::{self, CliEvent, Dest, Holdback},
@@ -41,7 +42,9 @@ pub struct Engine {
     pub paths: Paths,
     pub name: String,
     claude: PathBuf,
-    brain: tokio::sync::Mutex<Option<String>>,
+    /// Uma fila por conversa: duas conversas não esperam uma pela outra.
+    brains: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    pub convs: Conversations,
     local: Semaphore,
     running: Mutex<HashMap<String, i32>>,
     usage: Mutex<Usage>,
@@ -159,6 +162,12 @@ impl Engine {
     pub fn new(store: Arc<Store>, cfg: Config, paths: Paths) -> Arc<Self> {
         let local = Semaphore::new(cfg.max_local_tasks.max(1));
         let mind = Arc::new(Mind::open(paths.home.join("mind.json"), store.tx.clone()));
+        let convs = Conversations::open(paths.home.join("conversas.json"));
+        // Tarefas de antes das conversas vão para uma conversa própria.
+        if let Some(first) = store.has_orphans() {
+            let c = convs.create(Some("Conversas anteriores"), Some(first));
+            store.adopt_orphans(&c.id);
+        }
         Arc::new(Self {
             mind,
             store,
@@ -166,7 +175,8 @@ impl Engine {
             paths,
             name: hostname(),
             claude: find_claude(),
-            brain: Default::default(),
+            brains: Default::default(),
+            convs,
             local,
             running: Default::default(),
             usage: Default::default(),
@@ -180,13 +190,24 @@ impl Engine {
         text: &str,
         target: Target,
         machine: Option<String>,
+        conversation: Option<String>,
     ) -> Result<Task, String> {
         let (target, text) = route::resolve(target, text);
         if text.is_empty() {
             return Err("mensagem vazia".into());
         }
         self.mind.observe_task(&text);
-        let task = self.store.create(text, target, machine);
+        // Tarefa repassada por outra máquina não abre conversa aqui.
+        let conversation = if machine.as_deref() == Some("local") {
+            None
+        } else {
+            let id = conversation
+                .filter(|c| self.convs.get(c).is_some())
+                .unwrap_or_else(|| self.convs.create(None, None).id);
+            self.convs.touch(&id, Some(&text));
+            Some(id)
+        };
+        let task = self.store.create(text, target, machine, conversation);
         let (me, id) = (self.clone(), task.id.clone());
         tokio::spawn(async move { me.run(id).await });
         Ok(task)
@@ -204,8 +225,9 @@ impl Engine {
     }
 
     /// Espera a resposta em andamento terminar e esquece a conversa.
+    /// Mantido por compatibilidade: hoje "nova conversa" é uma conversa nova.
     pub async fn reset_brain(&self) {
-        *self.brain.lock().await = None;
+        self.convs.create(None, None);
     }
 
     /// Só tarefas à espera de aprovação podem ser liberadas.
@@ -232,7 +254,7 @@ impl Engine {
             return Err("pedido vazio".into());
         }
         let kind = if route::REQUEST_KINDS.contains(&kind) { kind } else { "funcionalidade" };
-        let task = self.store.create(text.to_string(), Target::Request, None);
+        let task = self.store.create(text.to_string(), Target::Request, None, self.convs.current());
         self.store.update(&task.id, |t| t.kind = Some(kind.to_string()));
         let (me, id, kind, text) = (self.clone(), task.id.clone(), kind.to_string(), text.to_string());
         tokio::spawn(async move { me.run_request(&id, &kind, &text, agent).await });
@@ -364,7 +386,7 @@ impl Engine {
         let initiative = self.mind.accept(id)?;
         match &initiative.action {
             Action::Outfit { theme } => {
-                let task = self.store.create(format!("Criar roupinha: {theme}"), Target::Chat, None);
+                let task = self.store.create(format!("Criar roupinha: {theme}"), Target::Chat, None, self.convs.current());
                 let (me, theme) = (self.clone(), theme.clone());
                 tokio::spawn(async move { me.run_outfit(&task.id, &theme).await });
             }
@@ -372,7 +394,7 @@ impl Engine {
                 self.create_decor(theme, None);
             }
             Action::Task { text, target } => {
-                let _ = self.submit(text, *target, None);
+                let _ = self.submit(text, *target, None, self.convs.current());
             }
             _ => {}
         }
@@ -382,7 +404,7 @@ impl Engine {
     /// Cria uma casinha nova. Aparece no chat, porque gasta tokens.
     pub fn create_decor(self: &Arc<Self>, theme: &str, suggestion: Option<String>) -> Task {
         let label = suggestion.as_deref().unwrap_or(theme);
-        let task = self.store.create(format!("Decorar casinha: {label}"), Target::Chat, None);
+        let task = self.store.create(format!("Decorar casinha: {label}"), Target::Chat, None, self.convs.current());
         let (me, id, theme) = (self.clone(), task.id.clone(), theme.to_string());
         tokio::spawn(async move {
             if !me.start(&id) {
@@ -457,7 +479,10 @@ impl Engine {
         if !self.start(id) {
             return;
         }
-        let mut session = self.brain.lock().await;
+        let conv = self.store.get(id).and_then(|t| t.conversation).unwrap_or_default();
+        let lane = self.brains.lock().unwrap().entry(conv.clone()).or_default().clone();
+        let _turn = lane.lock().await;
+        let session = self.convs.get(&conv).and_then(|c| c.session);
         let memory = self.mind.summary();
         let memory = if memory.is_empty() { String::new() } else { format!(" Memória sobre o usuário (use com naturalidade, sem recitar): {memory}") };
         let system = if delegate {
@@ -476,14 +501,13 @@ impl Engine {
         let out = match self.stream(id, cmd, text, delegate).await {
             Ok(out) => out,
             Err(e) => {
-                *session = None;
-                drop(session);
+                // Uma sessão que não retoma mais não pode travar a conversa.
+                self.convs.set_session(&conv, None);
                 self.finish(id, Err(e));
                 return;
             }
         };
-        *session = out.session;
-        drop(session);
+        self.convs.set_session(&conv, out.session.clone());
 
         match route::parse_delegate(&out.text).filter(|_| delegate) {
             Some((Dest::Cloud, prompt)) => {

@@ -115,16 +115,17 @@ struct Tokens {
     cache_creation_input_tokens: u64,
 }
 
-struct Entry {
-    ts: u64,
-    model: u16,
-    tokens: u32,
-}
+/// Respostas recentes, para não contar duas vezes a mesma resposta (que é
+/// gravada várias vezes seguidas, a última com o total final).
+const RECENT: usize = 4096;
 
 pub struct Scanner {
     root: PathBuf,
     offsets: HashMap<PathBuf, u64>,
-    entries: HashMap<u64, Entry>,
+    /// Totais por (hora desde 1970, modelo): poucos KB em vez de uma entrada por resposta.
+    buckets: HashMap<(u32, u16), u64>,
+    recent: HashMap<u64, (u32, u16, u64)>,
+    order: std::collections::VecDeque<u64>,
     models: Vec<String>,
     active: usize,
 }
@@ -134,7 +135,9 @@ impl Scanner {
         Self {
             root,
             offsets: HashMap::new(),
-            entries: HashMap::new(),
+            buckets: HashMap::new(),
+            recent: HashMap::new(),
+            order: std::collections::VecDeque::new(),
             models: Vec::new(),
             active: 0,
         }
@@ -148,7 +151,8 @@ impl Scanner {
         let root = self.root.clone();
         self.walk(&root, now, &mut seen);
         self.offsets.retain(|p, _| seen.contains(p));
-        self.entries.retain(|_, e| now.saturating_sub(e.ts) < RETENTION);
+        let oldest = (now.saturating_sub(RETENTION) / 3600) as u32;
+        self.buckets.retain(|(hour, _), _| *hour >= oldest);
         self.summary(now)
     }
 
@@ -259,15 +263,22 @@ impl Scanner {
         row.request_id.hash(&mut h);
         let model = self.model_index(&model);
         let tokens = u.input_tokens + u.output_tokens + u.cache_creation_input_tokens;
+        let hour = (ts / 3600) as u32;
+        let key = h.finish();
         // A mesma resposta é gravada várias vezes; a última tem o total final.
-        self.entries.insert(
-            h.finish(),
-            Entry {
-                ts,
-                model,
-                tokens: u32::try_from(tokens).unwrap_or(u32::MAX),
-            },
-        );
+        if let Some((h0, m0, t0)) = self.recent.insert(key, (hour, model, tokens)) {
+            if let Some(b) = self.buckets.get_mut(&(h0, m0)) {
+                *b = b.saturating_sub(t0);
+            }
+        } else {
+            self.order.push_back(key);
+            if self.order.len() > RECENT {
+                if let Some(old) = self.order.pop_front() {
+                    self.recent.remove(&old);
+                }
+            }
+        }
+        *self.buckets.entry((hour, model)).or_default() += tokens;
     }
 
     fn model_index(&mut self, name: &str) -> u16 {
@@ -283,11 +294,12 @@ impl Scanner {
         let week_start = now.saturating_sub(WEEK);
         let (mut today, mut week) = (0, 0);
         let mut by_model = vec![0u64; self.models.len()];
-        for e in self.entries.values().filter(|e| e.ts >= week_start) {
-            week += e.tokens as u64;
-            by_model[e.model as usize] += e.tokens as u64;
-            if e.ts >= day_start {
-                today += e.tokens as u64;
+        let (week_hour, day_hour) = ((week_start / 3600) as u32, (day_start / 3600) as u32);
+        for (&(hour, model), &tokens) in self.buckets.iter().filter(|((h, _), _)| *h >= week_hour) {
+            week += tokens;
+            by_model[model as usize] += tokens;
+            if hour >= day_hour {
+                today += tokens;
             }
         }
         let mut grouped: HashMap<String, u64> = HashMap::new();

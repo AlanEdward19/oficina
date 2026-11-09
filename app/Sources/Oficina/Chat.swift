@@ -15,40 +15,86 @@ struct ChatView: View {
     let close: () -> Void
     @State private var draft = ""
     @State private var target = "auto"
-    @AppStorage("chatClearedAt") private var clearedAt: Double = 0
+    @State private var renaming = false
+    @State private var newTitle = ""
+    @State private var confirmDelete = false
+    @State private var toast: String?
     @FocusState private var focused: Bool
 
-    private var visible: [TaskItem] {
-        core.tasks.filter { Double($0.createdAt) > clearedAt }.suffix(60)
-    }
+    private var thread: [TaskItem] { core.thread }
+    private var conversation: ConversationItem? { core.conversations.first { $0.id == core.current } }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
+        HStack(spacing: 0) {
+            ConversationList(core: core) { focused = true }
+                .frame(width: 216)
             Divider().opacity(0.5)
-            if visible.isEmpty { emptyState } else { messages }
-            composer
+            VStack(spacing: 0) {
+                header
+                Divider().opacity(0.5)
+                if thread.isEmpty { emptyState } else { messages }
+                composer
+            }
         }
-        .frame(width: 420, height: 580)
+        .frame(width: 700, height: 580)
         .background(.regularMaterial)
-        .onAppear { focused = true }
+        .overlay(alignment: .top) {
+            if let toast {
+                Text(toast)
+                    .font(.callout.weight(.medium))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.thickMaterial, in: Capsule())
+                    .padding(.top, 54)
+                    .transition(.opacity)
+            }
+        }
+        .onAppear {
+            focused = true
+            core.loadConversations()
+        }
         .onExitCommand(perform: close)
+        .alert("Renomear conversa", isPresented: $renaming) {
+            TextField("Título", text: $newTitle)
+            Button("Salvar") { if let id = core.current { core.renameConversation(id, newTitle) } }
+            Button("Cancelar", role: .cancel) {}
+        }
+        .confirmationDialog("Apagar esta conversa?", isPresented: $confirmDelete) {
+            Button("Apagar", role: .destructive) { if let id = core.current { core.deleteConversation(id) } }
+        } message: {
+            Text("Some da Oficina. A sessão continua no Claude Code.")
+        }
     }
 
     // MARK: Cabeçalho
 
     private var header: some View {
         HStack(spacing: 10) {
-            FaiscaAvatar(size: 30, mood: headerMood)
+            FaiscaAvatar(size: 28, mood: headerMood)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Faísca").font(.headline)
+                Text(conversation?.title ?? "Nova conversa").font(.headline).lineLimit(1)
                 Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
+            Button(action: core.newConversation) {
+                Image(systemName: "square.and.pencil").font(.title3)
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("n")
+            .help("Nova conversa (⌘N)")
             Menu {
-                Button("Nova conversa", systemImage: "square.and.pencil", action: newConversation)
-                    .keyboardShortcut("n")
-                Divider()
+                if let c = conversation {
+                    Button("Renomear…", systemImage: "pencil") {
+                        newTitle = c.title
+                        renaming = true
+                    }
+                    if c.session != nil {
+                        Button("Continuar no Claude Code", systemImage: "terminal") { copyResume(c) }
+                    }
+                    Divider()
+                    Button("Apagar conversa", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                    Divider()
+                }
                 Button("Fechar", systemImage: "xmark", action: close)
             } label: {
                 Image(systemName: "ellipsis.circle").font(.title3)
@@ -63,17 +109,29 @@ struct ChatView: View {
     }
 
     private var headerMood: Mood {
-        if visible.contains(where: { $0.status == "awaiting_approval" }) { return .waiting }
-        return visible.contains(where: \.isActive) ? .thinking : .idle
+        if thread.contains(where: { $0.status == "awaiting_approval" }) { return .waiting }
+        return thread.contains(where: \.isActive) ? .thinking : .idle
     }
 
     private var subtitle: String {
         if !core.connected { return "Reconectando ao core…" }
-        if let t = visible.last(where: \.isActive) { return runningLabel(t) }
+        if let t = thread.last(where: \.isActive) { return runningLabel(t) }
         if let s = core.usage?.limits.first(where: { $0.kind == "session" }) {
-            return "Pronta · sessão do Claude em \(Int(s.percent.rounded()))%"
+            return "Faísca · sessão do Claude em \(Int(s.percent.rounded()))%"
         }
-        return "Pronta"
+        return "Faísca"
+    }
+
+    /// A conversa é uma sessão do Claude Code: este comando a retoma lá.
+    private func copyResume(_ c: ConversationItem) {
+        guard let session = c.session else { return }
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Oficina/brain").path
+        let command = "cd \"\(dir)\" && claude --resume \(session)"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        withAnimation { toast = "Comando copiado: cole no Terminal" }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { withAnimation { toast = nil } }
     }
 
     // MARK: Mensagens
@@ -116,20 +174,23 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(visible) { task in
+                    ForEach(thread) { task in
                         Turn(task: task, core: core).id(task.id)
                     }
                     Color.clear.frame(height: 1).id("end")
                 }
                 .padding(14)
             }
-            .onChange(of: visible.last?.output) { proxy.scrollTo("end", anchor: .bottom) }
-            .onChange(of: visible.count) { proxy.scrollTo("end", anchor: .bottom) }
+            .onChange(of: thread.last?.output) { proxy.scrollTo("end", anchor: .bottom) }
+            .onChange(of: thread.count) { proxy.scrollTo("end", anchor: .bottom) }
+            .onChange(of: core.current) { proxy.scrollTo("end", anchor: .bottom) }
             .onAppear { proxy.scrollTo("end", anchor: .bottom) }
         }
     }
 
     // MARK: Entrada
+
+    private var running: TaskItem? { thread.last(where: \.isActive) }
 
     private var composer: some View {
         VStack(spacing: 8) {
@@ -156,26 +217,35 @@ struct ChatView: View {
                 .help("Onde executar: \(targetName)")
                 .accessibilityLabel("Onde executar: \(targetName)")
 
-                TextField("Pedir alguma coisa…", text: $draft, axis: .vertical)
+                TextField("Mensagem para a Faísca…", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .lineLimit(1...6)
+                    .lineLimit(1...8)
                     .focused($focused)
                     .onSubmit(send)
                     .padding(.vertical, 3)
 
-                Button(action: send) {
-                    Image(systemName: "arrow.up.circle.fill").font(.title2)
+                if let running {
+                    Button { core.act(running.id, "cancel") } label: {
+                        Image(systemName: "stop.circle.fill").font(.title2)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Parar")
+                    .accessibilityLabel("Parar resposta")
+                } else {
+                    Button(action: send) {
+                        Image(systemName: "arrow.up.circle.fill").font(.title2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.5))
+                    .disabled(!canSend)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .help("Enviar (Return)")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.5))
-                .disabled(!canSend)
-                .keyboardShortcut(.return, modifiers: .command)
-                .help("Enviar (Return)")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-            Text("Return envia · ⌥Return quebra linha · /nuvem e /pc escolhem o destino")
+            Text("Return envia · ⌥Return quebra linha · ⌘N nova conversa · /nuvem e /pc escolhem o destino")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -208,11 +278,147 @@ struct ChatView: View {
         core.send(text, target: target)
         draft = ""
     }
+}
 
-    private func newConversation() {
-        clearedAt = Date().timeIntervalSince1970 * 1000
-        core.resetBrain()
-        focused = true
+/// Barra lateral: conversas agrupadas por data, como nos apps de chat.
+private struct ConversationList: View {
+    @ObservedObject var core: Core
+    let picked: () -> Void
+
+    private var groups: [(String, [ConversationItem])] {
+        let cal = Calendar.current
+        let now = Date()
+        var out: [String: [ConversationItem]] = [:]
+        for c in core.conversations {
+            let d = Date(timeIntervalSince1970: TimeInterval(c.updatedAt) / 1000)
+            let key: String
+            if cal.isDateInToday(d) { key = "Hoje" }
+            else if cal.isDateInYesterday(d) { key = "Ontem" }
+            else if now.timeIntervalSince(d) < 7 * 86_400 { key = "Últimos 7 dias" }
+            else { key = "Mais antigas" }
+            out[key, default: []].append(c)
+        }
+        return ["Hoje", "Ontem", "Últimos 7 dias", "Mais antigas"].compactMap { k in out[k].map { (k, $0) } }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Conversas").font(.headline)
+                Spacer()
+                Button(action: core.newConversation) {
+                    Image(systemName: "square.and.pencil")
+                }
+                .buttonStyle(.borderless)
+                .help("Nova conversa")
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 52)
+            Divider().opacity(0.5)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    if core.conversations.isEmpty {
+                        Text("Suas conversas aparecem aqui.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(10)
+                    }
+                    ForEach(groups, id: \.0) { title, items in
+                        Text(title)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.top, 10)
+                            .padding(.bottom, 2)
+                        ForEach(items) { c in row(c) }
+                    }
+                }
+                .padding(6)
+            }
+        }
+        .background(Color.primary.opacity(0.03))
+    }
+
+    private func row(_ c: ConversationItem) -> some View {
+        let selected = core.current == c.id
+        return Button {
+            core.select(c.id)
+            picked()
+        } label: {
+            Text(c.title)
+                .font(.callout)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(selected ? Color.accentColor.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Apagar", role: .destructive) { core.deleteConversation(c.id) }
+        }
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// Texto da resposta com Markdown e blocos de código (com botão de copiar).
+struct MessageBody: View {
+    let text: String
+
+    private var parts: [(code: Bool, lang: String, body: String)] {
+        var out: [(Bool, String, String)] = []
+        let chunks = text.components(separatedBy: "```")
+        for (i, chunk) in chunks.enumerated() {
+            if i % 2 == 1 {
+                var lines = chunk.components(separatedBy: "\n")
+                let lang = lines.first?.trimmingCharacters(in: .whitespaces) ?? ""
+                if !lines.isEmpty { lines.removeFirst() }
+                out.append((true, lang, lines.joined(separator: "\n").trimmingCharacters(in: .newlines)))
+            } else if !chunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                out.append((false, "", chunk.trimmingCharacters(in: .newlines)))
+            }
+        }
+        return out
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(parts.enumerated()), id: \.offset) { _, p in
+                if p.code {
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack {
+                            Text(p.lang.isEmpty ? "código" : p.lang).font(.caption2).foregroundStyle(.secondary)
+                            Spacer()
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(p.body, forType: .string)
+                            } label: {
+                                Label("Copiar", systemImage: "doc.on.doc").font(.caption2)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            Text(p.body)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                                .padding(.horizontal, 10)
+                                .padding(.bottom, 8)
+                        }
+                    }
+                    .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+                } else {
+                    Text(inline(p.body)).textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private func inline(_ s: String) -> AttributedString {
+        let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: s, options: opts)) ?? AttributedString(s)
     }
 }
 
@@ -274,7 +480,7 @@ private struct Turn: View {
                 .foregroundStyle(.secondary)
         }
         if !task.output.isEmpty {
-            Text(markdown(task.output)).textSelection(.enabled)
+            MessageBody(text: task.output)
         }
         switch task.status {
         case "queued", "running":
@@ -309,11 +515,6 @@ private struct Turn: View {
                     .font(.callout.weight(.medium))
             }
         }
-    }
-
-    private func markdown(_ s: String) -> AttributedString {
-        let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return (try? AttributedString(markdown: s, options: opts)) ?? AttributedString(s)
     }
 
     private func copy(_ s: String) {
