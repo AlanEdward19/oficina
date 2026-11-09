@@ -264,6 +264,19 @@ final class PetView: NSView {
         }
     }
 
+    /// Rastejar: achata e estica enquanto sobe ou desce pela borda.
+    func crawling(_ on: Bool) {
+        if on {
+            let a = CAKeyframeAnimation(keyPath: "transform.scale.y")
+            a.values = [1, 0.82, 1.05, 1]
+            a.duration = 0.45
+            a.repeatCount = .infinity
+            body.add(a, forKey: "crawl")
+        } else {
+            body.removeAnimation(forKey: "crawl")
+        }
+    }
+
     /// Giro de comemoração.
     func spin() {
         let a = CABasicAnimation(keyPath: "transform.rotation.z")
@@ -505,23 +518,30 @@ final class PetView: NSView {
     }
 }
 
-/// Janela do pet, gravidade, passeios e a vida em cima da Dock.
+/// Janela do pet: a casa na Dock, as saídas pela tela, gravidade e passeios.
+/// Existe uma Faísca só: ou está sentada na Dock, ou está andando pela tela.
 @MainActor
 final class PetController {
     let window: NSPanel
     let view: PetView
     /// Topo da Dock (embaixo) e sua faixa horizontal, se estiver à vista.
     var shelf: () -> (y: CGFloat, x: ClosedRange<CGFloat>)? = { nil }
+    /// Onde a janela fica quando ela está em casa (pode estar fora da tela).
+    var homeFrame: () -> NSRect? = { nil }
+    var dockVisible: () -> Bool = { false }
+    var dockFrame: () -> NSRect? = { nil }
     var iconX: (String) -> CGFloat? = { _ in nil }
     var randomIcon: () -> String? = { nil }
     var nudge: (String) -> Void = { _ in }
     var onEvent: (String) -> Void = { _ in }
 
+    private(set) var home = false
     private var walkTimer: Timer?
     private var celebrateUntil = Date.distantPast
     private var taskMood: Mood?
     private var mindMood: Mood = .idle
     private var moving = false
+    private var outUntil = Date.distantPast
     private let foot: CGFloat = 5
 
     init() {
@@ -535,7 +555,7 @@ final class PetController {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
-        // Acima da Dock, para poder ficar em cima dela.
+        // Acima da Dock, para poder sentar e andar nela.
         window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
         view = PetView(frame: NSRect(origin: .zero, size: size))
@@ -545,11 +565,14 @@ final class PetController {
         }
         window.orderFrontRegardless()
         view.onDragStart = { [weak self] in
-            self?.moving = false
-            self?.view.walking(false)
-            self?.onEvent("pet_drag")
+            guard let self else { return }
+            self.moving = false
+            self.home = false
+            self.view.walking(false)
+            self.view.crawling(false)
+            self.onEvent("pet_drag")
         }
-        view.onDrop = { [weak self] in self?.settle(animated: true) }
+        view.onDrop = { [weak self] in self?.dropped() }
         view.onPetted = { [weak self] in
             self?.celebrate(.happy, seconds: 1.6)
             self?.onEvent("pet_petted")
@@ -590,6 +613,8 @@ final class PetController {
         default: .idle
         }
         refresh()
+        // Para dormir, volta para casa.
+        if sleeping, !home { goHome() }
     }
 
     func celebrate(_ mood: Mood, seconds: Double) {
@@ -611,9 +636,112 @@ final class PetController {
         view.wear(outfit)
     }
 
+    // MARK: Casa na Dock
+
+    /// Está em casa com a Dock recolhida: fora da vista.
+    var hiddenAtHome: Bool { home && !dockVisible() }
+
+    /// A Dock se mexeu: em casa, ela acompanha; fora, só ajusta o chão.
+    func dockMoved(home target: NSRect?, animated: Bool) {
+        guard !moving, NSEvent.pressedMouseButtons == 0 else { return }
+        if home, let target {
+            move(to: target, duration: animated ? 0.22 : 0)
+        } else if home {
+            // Sem casa (Dock desligada ou de lado): ela fica na tela.
+            home = false
+            settle(animated: animated)
+        } else {
+            settle(animated: true)
+        }
+    }
+
+    /// Primeira posição: sentada em casa, se houver casa.
+    func startAtHome() {
+        guard let target = homeFrame() else {
+            settle(animated: false)
+            return
+        }
+        home = true
+        window.setFrame(target, display: false)
+    }
+
+    /// Sai de casa: pula da Dock ou, recolhida, rasteja de baixo da borda.
+    func comeOut(then done: (() -> Void)? = nil) {
+        guard home, !moving, let start = homeFrame() else {
+            done?()
+            return
+        }
+        home = false
+        outUntil = Date().addingTimeInterval(.random(in: 90...240))
+        moving = true
+        if dockVisible() {
+            var up = start
+            up.origin.y = floorY(start.midX)
+            view.look(-1)
+            animate(to: up, duration: 0.28, timing: .easeOut) { [weak self] in
+                self?.moving = false
+                done?()
+            }
+        } else {
+            // Começa logo abaixo da borda, onde a Dock estaria, e sobe.
+            var below = start
+            below.origin.y = screen.minY - start.height + 4
+            window.setFrame(below, display: false)
+            var up = below
+            up.origin.y = screen.minY
+            view.crawling(true)
+            animate(to: up, duration: 1.1, timing: .easeOut) { [weak self] in
+                self?.view.crawling(false)
+                self?.moving = false
+                done?()
+            }
+        }
+    }
+
+    /// Volta para casa: anda até a Dock e senta, ou rasteja para baixo da borda.
+    func goHome() {
+        guard !home, let target = homeFrame() else { return }
+        go(to: target.midX) { [weak self] in
+            guard let self, let target = self.homeFrame() else { return }
+            self.moving = true
+            if self.dockVisible() {
+                self.animate(to: target, duration: 0.25, timing: .easeIn) {
+                    self.moving = false
+                    self.home = true
+                }
+            } else {
+                var below = self.window.frame
+                below.origin.y = self.screen.minY - below.height + 4
+                self.view.crawling(true)
+                self.animate(to: below, duration: 0.9, timing: .easeIn) {
+                    self.view.crawling(false)
+                    self.window.setFrame(target, display: false)
+                    self.moving = false
+                    self.home = true
+                }
+            }
+        }
+    }
+
+    /// Solta em cima da Dock: entra em casa. Fora dela: cai até o chão.
+    private func dropped() {
+        if let dock = dockFrame(), dockVisible(), dock.contains(NSPoint(x: window.frame.midX, y: window.frame.minY + 20)),
+           let target = homeFrame() {
+            moving = true
+            animate(to: target, duration: 0.3, timing: .easeInEaseOut) { [weak self] in
+                self?.moving = false
+                self?.home = true
+            }
+            return
+        }
+        home = false
+        outUntil = Date().addingTimeInterval(300)
+        settle(animated: true)
+    }
+
     // MARK: Chão e movimento
 
-    private var screen: NSRect { (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero }
+    private var screen: NSRect { (window.screen ?? NSScreen.main)?.frame ?? .zero }
 
     /// Onde ela fica de pé num dado x: em cima da Dock ou na base da tela.
     private func floorY(_ centerX: CGFloat) -> CGFloat {
@@ -625,20 +753,34 @@ final class PetController {
         min(max(centerX, screen.minX + window.frame.width / 2), screen.maxX - window.frame.width / 2)
     }
 
-    /// Cai (ou sobe) até o chão onde está. Usado ao soltar e quando a Dock muda.
+    private func move(to frame: NSRect, duration: Double) {
+        if duration <= 0 {
+            window.setFrame(frame, display: false)
+        } else {
+            animate(to: frame, duration: duration, timing: .easeOut, done: nil)
+        }
+    }
+
+    private func animate(to frame: NSRect, duration: Double, timing: CAMediaTimingFunctionName, done: (() -> Void)?) {
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = duration
+            ctx.timingFunction = CAMediaTimingFunction(name: timing)
+            window.animator().setFrame(frame, display: false)
+        }, completionHandler: {
+            MainActor.assumeIsolated { done?() }
+        })
+    }
+
+    /// Cai (ou sobe) até o chão onde está.
     func settle(animated: Bool) {
-        guard !moving, NSEvent.pressedMouseButtons == 0 else { return }
+        guard !home, !moving, NSEvent.pressedMouseButtons == 0 else { return }
         var f = window.frame
         let y = floorY(f.midX)
         guard abs(f.minY - y) > 0.5 else { return }
         let fall = f.minY - y
         f.origin.y = y
         if animated {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = min(0.5, max(0.15, Double(abs(fall)) / 1400))
-                ctx.timingFunction = CAMediaTimingFunction(name: fall > 0 ? .easeIn : .easeOut)
-                window.animator().setFrame(f, display: false)
-            }
+            animate(to: f, duration: min(0.5, max(0.15, Double(abs(fall)) / 1400)), timing: fall > 0 ? .easeIn : .easeOut, done: nil)
         } else {
             window.setFrame(f, display: false)
         }
@@ -646,7 +788,7 @@ final class PetController {
 
     /// Anda até um x, pulando para cima ou para baixo da Dock no caminho.
     func go(to centerX: CGFloat, speed: CGFloat = 90, then done: (() -> Void)? = nil) {
-        guard NSEvent.pressedMouseButtons == 0 else { return }
+        guard !home, NSEvent.pressedMouseButtons == 0 else { return }
         let target = clampX(centerX)
         let start = window.frame.midX
         guard abs(target - start) > 2 else {
@@ -684,41 +826,38 @@ final class PetController {
         // Na beirada da Dock, o chão do outro lado decide: sobe ou desce num pulo.
         let landing = floorY(next + dir * 2)
         let hop = abs(landing - f.minY) > 1
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = Double(distance / speed)
-            ctx.timingFunction = CAMediaTimingFunction(name: .linear)
-            window.animator().setFrame(f, display: false)
-        }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, self.moving else { return }
-                if hop {
-                    var g = self.window.frame
-                    g.origin.x += dir * 6
-                    g.origin.y = landing
-                    NSAnimationContext.runAnimationGroup({ ctx in
-                        ctx.duration = 0.2
-                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                        self.window.animator().setFrame(g, display: false)
-                    }, completionHandler: {
-                        MainActor.assumeIsolated { self.step(Array(stops.dropFirst()), dir: dir, speed: speed, done: done) }
-                    })
-                } else {
+        animate(to: f, duration: Double(distance / speed), timing: .linear) { [weak self] in
+            guard let self, self.moving else { return }
+            if hop {
+                var g = self.window.frame
+                g.origin.x += dir * 6
+                g.origin.y = landing
+                self.animate(to: g, duration: 0.2, timing: .easeOut) {
                     self.step(Array(stops.dropFirst()), dir: dir, speed: speed, done: done)
                 }
+            } else {
+                self.step(Array(stops.dropFirst()), dir: dir, speed: speed, done: done)
             }
-        })
-    }
-
-    /// Alguém abriu um app pela Dock: ela corre até o ícone e comemora.
-    func appOpened(_ id: String) {
-        guard let x = iconX(id), view.mood != .sleeping else { return }
-        go(to: x, speed: 320) { [weak self] in
-            self?.nudge(id)
-            self?.celebrate(.happy, seconds: 1.2)
         }
     }
 
-    /// Troca de ambiente: um giro de alegria.
+    // MARK: Vida
+
+    /// Alguém abriu um app pela Dock: ela sai, corre até o ícone e volta.
+    func appOpened(_ id: String) {
+        guard view.mood != .sleeping, dockVisible(), iconX(id) != nil else { return }
+        let visit = { [weak self] in
+            guard let self, let x = self.iconX(id) else { return }
+            self.go(to: x, speed: 320) {
+                self.nudge(id)
+                self.celebrate(.happy, seconds: 1.2)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.goHome() }
+            }
+        }
+        if home { comeOut(then: visit) } else { visit() }
+    }
+
+    /// Troca de ambiente: um giro de alegria, onde estiver.
     func environmentChanged() {
         view.spin()
         celebrate(.happy, seconds: 1)
@@ -737,18 +876,32 @@ final class PetController {
         walkTimer = t
     }
 
-    /// Passeio à toa. Curiosa ou entediada, vai mexer num ícone da Dock.
+    /// Em casa, às vezes sai para passear. Fora, passeia e, depois de um
+    /// tempo, volta. Curiosa ou entediada, vai mexer num ícone da Dock.
     private func wander() {
-        guard !moving, [.idle, .curious, .bored].contains(view.mood), NSEvent.pressedMouseButtons == 0 else { return }
-        let restless = view.mood == .curious || view.mood == .bored
-        if restless || Bool.random(), let id = randomIcon(), let x = iconX(id) {
+        guard !moving, [.idle, .curious, .bored, .lonely].contains(view.mood), NSEvent.pressedMouseButtons == 0 else { return }
+        let restless = view.mood == .curious || view.mood == .bored || view.mood == .lonely
+        if home {
+            guard restless || Double.random(in: 0...1) < 0.35 else { return }
+            comeOut { [weak self] in self?.stroll(restless: restless) }
+            return
+        }
+        if Date() > outUntil {
+            goHome()
+            return
+        }
+        stroll(restless: restless)
+    }
+
+    private func stroll(restless: Bool) {
+        if dockVisible(), restless || Bool.random(), let id = randomIcon(), let x = iconX(id) {
             go(to: x) { [weak self] in
                 self?.nudge(id)
                 self?.onEvent("pet_visit")
             }
             return
         }
-        let dx = CGFloat.random(in: 60...200) * (Bool.random() ? 1 : -1)
+        let dx = CGFloat.random(in: 80...260) * (Bool.random() ? 1 : -1)
         go(to: window.frame.midX + dx)
     }
 }

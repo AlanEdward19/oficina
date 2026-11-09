@@ -386,6 +386,8 @@ private struct Glass: NSViewRepresentable {
     func updateNSView(_ v: NSVisualEffectView, context: Context) {}
 }
 
+let dockHomeID = "__faisca"
+
 /// Espaço livre além da barra para o ícone ampliado e o nome do app.
 func dockHeadroom(_ look: DockLook) -> CGFloat {
     max(34, look.tile * (look.magnify - 1) + 30)
@@ -605,16 +607,15 @@ struct DockView: View {
                 }
                 .foregroundStyle(.white)
             }
-            Button(action: store.openChat) {
-                Image(systemName: "bubble.left.fill")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 30, height: 30)
-                    .background(Color.white.opacity(0.12), in: Circle())
+            // A casa da Faísca: ela mesma senta aqui quando está na Dock.
+            if !vertical {
+                Color.clear
+                    .frame(width: 64, height: look.tile)
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: IconFrames.self, value: [dockHomeID: g.frame(in: .named("dock"))])
+                    })
+                    .accessibilityLabel("Casa da Faísca")
             }
-            .buttonStyle(.plain)
-            .help("Conversar com a Faísca")
-            .accessibilityLabel("Conversar com a Faísca")
         }
         .frame(minHeight: vertical ? nil : look.tile)
     }
@@ -689,8 +690,8 @@ final class DockController {
     private var watch: Timer?
     private var frames: [String: CGRect] = [:]
     private var bag = Set<AnyCancellable>()
-    /// Avisa quando a Dock mudou de lugar ou de tamanho.
-    var onLayout: () -> Void = {}
+    /// Avisa para onde a Dock vai (já com o quadro final) e se anima.
+    var onLayout: (NSRect, Bool) -> Void = { _, _ in }
 
     var enabled: Bool {
         get { UserDefaults.standard.object(forKey: "dockEnabled") as? Bool ?? true }
@@ -768,6 +769,20 @@ final class DockController {
         return (f.minY + barHeight, (f.minX + 14)...(f.maxX - 14))
     }
 
+    /// A Dock está à vista agora?
+    var visible: Bool { enabled && shown }
+
+    /// Quadro da janela da Faísca sentada na casa, para um quadro da Dock.
+    /// Com a Dock recolhida, a casa fica fora da tela, junto com ela.
+    func petHome(for dock: NSRect) -> NSRect? {
+        guard enabled, store.look.edge == .bottom, let r = frames[dockHomeID] else { return nil }
+        return NSRect(x: dock.minX + r.midX - 42, y: dock.minY + 2, width: 84, height: 88)
+    }
+
+    var petHome: NSRect? { petHome(for: panel.frame) }
+
+    var frame: NSRect { panel.frame }
+
     /// Centro do ícone em coordenadas da tela.
     func iconX(_ id: String) -> CGFloat? {
         guard enabled, shown, store.look.edge == .bottom, let r = frames[id] else { return nil }
@@ -781,7 +796,7 @@ final class DockController {
         } else {
             panel.orderOut(nil)
             edge.orderOut(nil)
-            onLayout()
+            onLayout(panel.frame, false)
         }
     }
 
@@ -806,17 +821,15 @@ final class DockController {
             target = NSRect(x: x, y: s.midY - size.height / 2, width: size.width, height: size.height)
         }
         if animated {
-            NSAnimationContext.runAnimationGroup({ ctx in
+            NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.22
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().setFrame(target, display: true)
-            }, completionHandler: { [weak self] in
-                MainActor.assumeIsolated { self?.onLayout() }
-            })
+            }
         } else {
             panel.setFrame(target, display: true)
-            onLayout()
         }
+        onLayout(target, animated)
         if store.look.autohide && !shown {
             let strip: NSRect
             switch store.look.edge {

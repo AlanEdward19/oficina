@@ -99,10 +99,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func wirePetToDock() {
         pet.shelf = { [weak self] in self?.dock.shelf }
+        pet.homeFrame = { [weak self] in self?.dock.petHome }
+        pet.dockVisible = { [weak self] in self?.dock.visible ?? false }
+        pet.dockFrame = { [weak self] in self?.dock.visible == true ? self?.dock.frame : nil }
         pet.iconX = { [weak self] id in self?.dock.iconX(id) }
         pet.randomIcon = { [weak self] in self?.dock.store.allIDs.randomElement() }
         pet.nudge = { [weak self] id in self?.dock.store.nudge(id) }
-        dock.onLayout = { [weak self] in self?.pet.settle(animated: true) }
+        dock.onLayout = { [weak self] target, animated in
+            guard let self else { return }
+            self.pet.dockMoved(home: self.dock.petHome(for: target), animated: animated)
+        }
         dock.store.onOpen = { [weak self] id in
             self?.core.mindEvents([["kind": "dock_open", "bundle": id]])
             self?.pet.appOpened(id)
@@ -111,7 +117,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.core.mindEvents([["kind": "env_switch", "name": env.name]])
             self?.pet.environmentChanged()
         }
-        DispatchQueue.main.async { [weak self] in self?.pet.settle(animated: false) }
+        // Começa sentada em casa, assim que a Dock souber onde fica a casa.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.pet.startAtHome() }
     }
 
     // MARK: Mente
@@ -152,10 +159,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         defer { lastBrief = brief }
         pet.setMind(brief.mood, sleeping: brief.sleeping)
         if brief.outfit != lastBrief?.outfit { pet.wear(brief.outfit) }
-        if brief.initiative != lastBrief?.initiative { bubble.ask(brief.initiative) }
+        if brief.initiative != lastBrief?.initiative {
+            // Para perguntar, ela precisa estar à vista: sai de baixo da borda.
+            if brief.initiative != nil, pet.hiddenAtHome {
+                pet.comeOut { [weak self] in self?.bubble.ask(brief.initiative) }
+            } else {
+                bubble.ask(brief.initiative)
+            }
+        }
         if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, !brief.sleeping, brief.mood != "focada" {
             let important = t.text.hasPrefix("Olha minha") || t.text.hasPrefix("Anotado") || t.text.hasPrefix("Modo ")
-            bubble.say(t.text, force: important)
+            if !pet.hiddenAtHome { bubble.say(t.text, force: important) }
         }
     }
 
