@@ -3,6 +3,13 @@ import QuartzCore
 
 enum Mood: Equatable {
     case idle, thinking, waiting, happy, sad, sleeping
+    case curious, bored, tired, lonely, focused
+}
+
+private func color(_ hex: String) -> CGColor {
+    var v: UInt64 = 0
+    Scanner(string: hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))).scanHexInt64(&v)
+    return CGColor(red: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255, blue: CGFloat(v & 0xFF) / 255, alpha: 1)
 }
 
 /// A Faísca: uma gota de solda com antena. Tudo é animado pelo Core Animation,
@@ -10,6 +17,9 @@ enum Mood: Equatable {
 final class PetView: NSView {
     var onClick: (() -> Void)?
     var onMenu: ((NSEvent) -> Void)?
+    var onDragStart: (() -> Void)?
+    var onDrop: (() -> Void)?
+    var onPetted: (() -> Void)?
 
     private let body = CAShapeLayer()
     private let leftEye = CALayer()
@@ -17,10 +27,16 @@ final class PetView: NSView {
     private let spark = CALayer()
     private let stem = CAShapeLayer()
     private let badge = CATextLayer()
+    private let outfitLayer = CALayer()
+    private let propLayer = CALayer()
+    private var bodyColor = NSColor(calibratedRed: 1, green: 0.62, blue: 0.16, alpha: 1).cgColor
     private var dragOffset: NSPoint?
     private var dragged = false
     private(set) var mood: Mood = .idle
     private var blinkTimer: Timer?
+    private var strokes: [(x: CGFloat, at: Date)] = []
+    private var lastStrokeDir: CGFloat = 0
+    private var lastPetted = Date.distantPast
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -35,11 +51,12 @@ final class PetView: NSView {
     override var isFlipped: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    private var w: CGFloat { bounds.width }
+
     private func build() {
         guard let root = layer else { return }
         root.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
 
-        let w = bounds.width
         let path = CGMutablePath()
         // Gota arredondada, mais larga na base.
         path.move(to: CGPoint(x: w / 2, y: 62))
@@ -48,6 +65,9 @@ final class PetView: NSView {
         path.addCurve(to: CGPoint(x: 12, y: 26), control1: CGPoint(x: w / 2 - 14, y: 6), control2: CGPoint(x: 12, y: 13))
         path.addCurve(to: CGPoint(x: w / 2, y: 62), control1: CGPoint(x: 12, y: 44), control2: CGPoint(x: w / 2 - 16, y: 56))
         path.closeSubpath()
+
+        root.addSublayer(propLayer)
+        propLayer.frame = bounds
 
         body.frame = bounds
         body.anchorPoint = CGPoint(x: 0.5, y: 0.08)
@@ -65,6 +85,9 @@ final class PetView: NSView {
             eye.cornerRadius = 4.5
             body.addSublayer(eye)
         }
+
+        outfitLayer.frame = bounds
+        body.addSublayer(outfitLayer)
 
         let stemPath = CGMutablePath()
         stemPath.move(to: CGPoint(x: w / 2, y: 60))
@@ -96,6 +119,8 @@ final class PetView: NSView {
         root.addSublayer(badge)
     }
 
+    // MARK: Humor
+
     func apply(_ next: Mood) {
         mood = next
         CATransaction.begin()
@@ -107,22 +132,33 @@ final class PetView: NSView {
         blinkTimer = nil
         badge.isHidden = next != .waiting
 
-        let (bodyColor, sparkColor): (NSColor, NSColor)
+        var fill = NSColor(cgColor: bodyColor) ?? .orange
+        var sparkColor: NSColor = .systemYellow
         switch next {
-        case .idle, .happy, .waiting:
-            (bodyColor, sparkColor) = (NSColor(calibratedRed: 1, green: 0.62, blue: 0.16, alpha: 1), .systemYellow)
-        case .thinking:
-            (bodyColor, sparkColor) = (NSColor(calibratedRed: 1, green: 0.55, blue: 0.12, alpha: 1), .cyan)
-        case .sad:
-            (bodyColor, sparkColor) = (NSColor(calibratedRed: 0.62, green: 0.56, blue: 0.62, alpha: 1), .systemRed)
-        case .sleeping:
-            (bodyColor, sparkColor) = (NSColor(calibratedRed: 0.72, green: 0.48, blue: 0.24, alpha: 1), .darkGray)
+        case .thinking: sparkColor = .cyan
+        case .sad, .lonely:
+            fill = fill.blended(withFraction: next == .sad ? 0.55 : 0.35, of: .gray) ?? fill
+            sparkColor = next == .sad ? .systemRed : .systemPurple
+        case .sleeping, .tired:
+            fill = fill.blended(withFraction: next == .sleeping ? 0.3 : 0.15, of: .brown) ?? fill
+            sparkColor = next == .sleeping ? .darkGray : .systemOrange
+        case .curious: sparkColor = .systemGreen
+        case .focused: sparkColor = .systemBlue
+        default: break
         }
-        body.fillColor = bodyColor.cgColor
+        body.fillColor = fill.cgColor
         spark.backgroundColor = sparkColor.cgColor
         spark.shadowColor = sparkColor.cgColor
 
-        setEyes(height: next == .sleeping ? 2 : 14, y: next == .sad ? 21 : 24)
+        switch next {
+        case .sleeping: setEyes(height: 2, y: 26)
+        case .tired: setEyes(height: 5, y: 26)
+        case .bored: setEyes(height: 7, y: 25)
+        case .focused: setEyes(height: 8, y: 26)
+        case .sad, .lonely: setEyes(height: 12, y: 21)
+        case .thinking: setEyes(height: 14, y: 28)
+        default: setEyes(height: 14, y: 24)
+        }
 
         switch next {
         case .idle:
@@ -133,22 +169,42 @@ final class PetView: NSView {
         case .thinking:
             breathe(amount: 1.04, duration: 0.7)
             pulseSpark(duration: 0.35)
-            setEyes(height: 14, y: 28)
         case .waiting:
             bounce(height: 5, duration: 0.45, repeats: .infinity)
             pulseSpark(duration: 0.5)
         case .happy:
             bounce(height: 16, duration: 0.22, repeats: 4)
-        case .sad:
+        case .sad, .lonely:
             breathe(amount: 0.98, duration: 2.6)
+        case .curious:
+            breathe(amount: 1.03, duration: 1.4)
+            glance()
+            scheduleBlink()
+        case .bored:
+            breathe(amount: 1.015, duration: 3.0)
+        case .tired:
+            breathe(amount: 1.02, duration: 2.8)
+            scheduleBlink()
+        case .focused:
+            breathe(amount: 1.01, duration: 2.4)
         }
     }
 
     private func setEyes(height: CGFloat, y: CGFloat) {
-        for eye in [leftEye, rightEye] {
-            eye.frame = CGRect(x: eye.frame.minX, y: y, width: 9, height: height)
+        for (eye, x) in [(leftEye, w / 2 - 15.0), (rightEye, w / 2 + 6.0)] {
+            eye.frame = CGRect(x: x, y: y, width: 9, height: height)
             eye.cornerRadius = min(height, 9) / 2
         }
+    }
+
+    /// Olhar para um lado (-1 esquerda, 1 direita), sem animar sempre.
+    func look(_ dir: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.15)
+        let dx = max(-1, min(1, dir)) * 3
+        leftEye.frame.origin.x = w / 2 - 15 + dx
+        rightEye.frame.origin.x = w / 2 + 6 + dx
+        CATransaction.commit()
     }
 
     private func breathe(amount: CGFloat, duration: CFTimeInterval) {
@@ -183,10 +239,56 @@ final class PetView: NSView {
         spark.add(a, forKey: "pulse")
     }
 
+    /// Curiosa: os olhos passeiam de um lado para o outro.
+    private func glance() {
+        for eye in [leftEye, rightEye] {
+            let a = CAKeyframeAnimation(keyPath: "transform.translation.x")
+            a.values = [0, -3, -3, 3, 3, 0]
+            a.keyTimes = [0, 0.15, 0.4, 0.55, 0.85, 1]
+            a.duration = 4
+            a.repeatCount = .infinity
+            eye.add(a, forKey: "glance")
+        }
+    }
+
+    /// Passinhos enquanto anda.
+    func walking(_ on: Bool) {
+        if on {
+            let a = CAKeyframeAnimation(keyPath: "transform.translation.y")
+            a.values = [0, 3, 0]
+            a.duration = 0.28
+            a.repeatCount = .infinity
+            body.add(a, forKey: "step")
+        } else {
+            body.removeAnimation(forKey: "step")
+        }
+    }
+
+    /// Giro de comemoração.
+    func spin() {
+        let a = CABasicAnimation(keyPath: "transform.rotation.z")
+        a.fromValue = 0
+        a.toValue = CGFloat.pi * 2
+        a.duration = 0.6
+        a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        body.add(a, forKey: "spin")
+    }
+
+    /// Olhos fechados de felicidade por um instante.
+    private func blissEyes() {
+        for eye in [leftEye, rightEye] {
+            let a = CAKeyframeAnimation(keyPath: "transform.scale.y")
+            a.values = [1, 0.2, 0.2, 1]
+            a.keyTimes = [0, 0.1, 0.85, 1]
+            a.duration = 1.4
+            eye.add(a, forKey: "bliss")
+        }
+    }
+
     private func scheduleBlink() {
         let t = Timer(timeInterval: .random(in: 2.5...7), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.mood == .idle else { return }
+                guard let self, [.idle, .curious, .tired].contains(self.mood) else { return }
                 for eye in [self.leftEye, self.rightEye] {
                     let a = CAKeyframeAnimation(keyPath: "transform.scale.y")
                     a.values = [1, 0.1, 1]
@@ -201,7 +303,182 @@ final class PetView: NSView {
         blinkTimer = t
     }
 
+    // MARK: Roupinha
+
+    func wear(_ outfit: OutfitData?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        outfitLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        propLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        bodyColor = outfit.map { color($0.body) } ?? NSColor(calibratedRed: 1, green: 0.62, blue: 0.16, alpha: 1).cgColor
+        guard let o = outfit else {
+            apply(mood)
+            return
+        }
+        let c = w / 2
+        func shape(_ path: CGPath, fill: String?, stroke: String? = nil, width: CGFloat = 2, into parent: CALayer? = nil) {
+            let l = CAShapeLayer()
+            l.path = path
+            l.fillColor = fill.map(color)
+            l.strokeColor = stroke.map(color)
+            l.lineWidth = width
+            l.lineCap = .round
+            l.lineJoin = .round
+            (parent ?? outfitLayer).addSublayer(l)
+        }
+        func ellipse(_ r: CGRect) -> CGPath { CGPath(ellipseIn: r, transform: nil) }
+        func rect(_ r: CGRect, _ radius: CGFloat = 2) -> CGPath { CGPath(roundedRect: r, cornerWidth: radius, cornerHeight: radius, transform: nil) }
+        func poly(_ pts: [CGPoint]) -> CGPath {
+            let p = CGMutablePath()
+            p.addLines(between: pts)
+            p.closeSubpath()
+            return p
+        }
+
+        switch o.neck.shape {
+        case "bowtie":
+            shape(poly([CGPoint(x: c, y: 14), CGPoint(x: c - 9, y: 19), CGPoint(x: c - 9, y: 9)]), fill: o.neck.color)
+            shape(poly([CGPoint(x: c, y: 14), CGPoint(x: c + 9, y: 19), CGPoint(x: c + 9, y: 9)]), fill: o.neck.color)
+            shape(ellipse(CGRect(x: c - 2.5, y: 11.5, width: 5, height: 5)), fill: o.neck.color)
+        case "scarf":
+            shape(rect(CGRect(x: 16, y: 13, width: w - 32, height: 7), 3.5), fill: o.neck.color)
+            shape(rect(CGRect(x: c + 6, y: 4, width: 7, height: 12), 3), fill: o.neck.color)
+        case "lanyard":
+            let p = CGMutablePath()
+            p.move(to: CGPoint(x: c - 13, y: 22)); p.addLine(to: CGPoint(x: c, y: 12)); p.addLine(to: CGPoint(x: c + 13, y: 22))
+            shape(p, fill: nil, stroke: o.neck.color, width: 2)
+            shape(rect(CGRect(x: c - 5, y: 3, width: 10, height: 10), 2), fill: "#FFFFFF", stroke: o.neck.color, width: 1)
+        case "tie":
+            shape(poly([CGPoint(x: c - 4, y: 18), CGPoint(x: c + 4, y: 18), CGPoint(x: c, y: 14)]), fill: o.neck.color)
+            shape(poly([CGPoint(x: c - 3, y: 15), CGPoint(x: c + 3, y: 15), CGPoint(x: c + 4, y: 6), CGPoint(x: c, y: 3), CGPoint(x: c - 4, y: 6)]), fill: o.neck.color)
+        default: break
+        }
+
+        let ly = 31.0, lx = c - 10.5, rx = c + 10.5
+        switch o.face.shape {
+        case "glasses_round":
+            shape(ellipse(CGRect(x: lx - 7.5, y: ly - 7.5, width: 15, height: 15)), fill: nil, stroke: o.face.color, width: 2)
+            shape(ellipse(CGRect(x: rx - 7.5, y: ly - 7.5, width: 15, height: 15)), fill: nil, stroke: o.face.color, width: 2)
+            let b = CGMutablePath(); b.move(to: CGPoint(x: lx + 7.5, y: ly + 1)); b.addLine(to: CGPoint(x: rx - 7.5, y: ly + 1))
+            shape(b, fill: nil, stroke: o.face.color, width: 2)
+        case "glasses_square":
+            shape(rect(CGRect(x: lx - 8, y: ly - 6.5, width: 16, height: 13), 3), fill: nil, stroke: o.face.color, width: 2)
+            shape(rect(CGRect(x: rx - 8, y: ly - 6.5, width: 16, height: 13), 3), fill: nil, stroke: o.face.color, width: 2)
+            let b = CGMutablePath(); b.move(to: CGPoint(x: lx + 8, y: ly + 1)); b.addLine(to: CGPoint(x: rx - 8, y: ly + 1))
+            shape(b, fill: nil, stroke: o.face.color, width: 2)
+        case "visor":
+            let l = CAShapeLayer()
+            l.path = rect(CGRect(x: 17, y: 25, width: w - 34, height: 12), 6)
+            l.fillColor = color(o.face.color).copy(alpha: 0.75)
+            outfitLayer.addSublayer(l)
+        case "monocle":
+            shape(ellipse(CGRect(x: rx - 8, y: ly - 8, width: 16, height: 16)), fill: nil, stroke: o.face.color, width: 2)
+            let ch = CGMutablePath(); ch.move(to: CGPoint(x: rx + 6, y: ly - 6)); ch.addQuadCurve(to: CGPoint(x: rx + 10, y: 12), control: CGPoint(x: rx + 12, y: ly - 14))
+            shape(ch, fill: nil, stroke: o.face.color, width: 1)
+        default: break
+        }
+
+        switch o.head.shape {
+        case "cap":
+            shape(CGPath(roundedRect: CGRect(x: c - 18, y: 50, width: 36, height: 16), cornerWidth: 16, cornerHeight: 14, transform: nil), fill: o.head.color)
+            shape(rect(CGRect(x: c + 4, y: 49, width: 24, height: 5), 2.5), fill: o.head.color)
+        case "beanie":
+            shape(CGPath(roundedRect: CGRect(x: c - 20, y: 49, width: 40, height: 19), cornerWidth: 18, cornerHeight: 16, transform: nil), fill: o.head.color)
+            shape(rect(CGRect(x: c - 21, y: 48, width: 42, height: 6), 3), fill: "#FFFFFF")
+        case "headset":
+            let band = CGMutablePath()
+            band.move(to: CGPoint(x: 13, y: 34)); band.addCurve(to: CGPoint(x: w - 13, y: 34), control1: CGPoint(x: 13, y: 74), control2: CGPoint(x: w - 13, y: 74))
+            shape(band, fill: nil, stroke: o.head.color, width: 3)
+            shape(rect(CGRect(x: 8, y: 26, width: 9, height: 15), 3), fill: o.head.color)
+            shape(rect(CGRect(x: w - 17, y: 26, width: 9, height: 15), 3), fill: o.head.color)
+            let mic = CGMutablePath(); mic.move(to: CGPoint(x: 11, y: 27)); mic.addQuadCurve(to: CGPoint(x: c - 10, y: 16), control: CGPoint(x: 12, y: 16))
+            shape(mic, fill: nil, stroke: o.head.color, width: 2)
+            shape(ellipse(CGRect(x: c - 13, y: 13, width: 6, height: 6)), fill: o.head.color)
+        case "crown":
+            shape(poly([CGPoint(x: c - 14, y: 54), CGPoint(x: c + 14, y: 54), CGPoint(x: c + 14, y: 68), CGPoint(x: c + 7, y: 61),
+                        CGPoint(x: c, y: 70), CGPoint(x: c - 7, y: 61), CGPoint(x: c - 14, y: 68)]), fill: o.head.color)
+        case "hardhat":
+            shape(CGPath(roundedRect: CGRect(x: c - 19, y: 50, width: 38, height: 18), cornerWidth: 18, cornerHeight: 16, transform: nil), fill: o.head.color)
+            shape(rect(CGRect(x: c - 25, y: 48, width: 50, height: 5), 2.5), fill: o.head.color)
+        case "wizard":
+            shape(poly([CGPoint(x: c - 18, y: 54), CGPoint(x: c + 18, y: 54), CGPoint(x: c + 4, y: 86)]), fill: o.head.color)
+            shape(rect(CGRect(x: c - 22, y: 51, width: 44, height: 5), 2.5), fill: o.head.color)
+        default: break
+        }
+
+        if let b = o.badge {
+            let l = CATextLayer()
+            l.frame = CGRect(x: c + 9, y: 9, width: 18, height: 11)
+            l.backgroundColor = color(b.color)
+            l.cornerRadius = 3
+            l.string = b.shape
+            l.fontSize = 7
+            l.font = NSFont.boldSystemFont(ofSize: 7)
+            l.foregroundColor = NSColor.white.cgColor
+            l.alignmentMode = .center
+            l.contentsScale = layer?.contentsScale ?? 2
+            outfitLayer.addSublayer(l)
+        }
+
+        switch o.prop {
+        case "laptop":
+            shape(rect(CGRect(x: 0, y: 2, width: 18, height: 12), 2), fill: "#3A3A3C", into: propLayer)
+            shape(rect(CGRect(x: -2, y: 0, width: 22, height: 3), 1.5), fill: "#8E8E93", into: propLayer)
+            shape(ellipse(CGRect(x: 7, y: 6, width: 4, height: 4)), fill: "#FFFFFF", into: propLayer)
+        case "coffee":
+            shape(rect(CGRect(x: w - 15, y: 1, width: 11, height: 12), 2), fill: "#FFFFFF", into: propLayer)
+            shape(ellipse(CGRect(x: w - 7, y: 4, width: 6, height: 6)), fill: nil, stroke: "#FFFFFF", width: 2, into: propLayer)
+        case "wrench":
+            let p = CGMutablePath(); p.move(to: CGPoint(x: 2, y: 2)); p.addLine(to: CGPoint(x: 13, y: 13))
+            shape(p, fill: nil, stroke: "#A0A0A8", width: 3, into: propLayer)
+            shape(ellipse(CGRect(x: 10, y: 10, width: 7, height: 7)), fill: nil, stroke: "#A0A0A8", width: 2.5, into: propLayer)
+        case "flask":
+            shape(poly([CGPoint(x: w - 13, y: 14), CGPoint(x: w - 9, y: 14), CGPoint(x: w - 9, y: 10), CGPoint(x: w - 4, y: 1),
+                        CGPoint(x: w - 18, y: 1), CGPoint(x: w - 13, y: 10)]), fill: "#7CF2C4", stroke: "#FFFFFF", width: 1, into: propLayer)
+        default: break
+        }
+        apply(mood)
+    }
+
     // MARK: Gestos
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    /// Carinho: passar o mouse de um lado para o outro em cima dela.
+    override func mouseMoved(with event: NSEvent) {
+        let x = event.locationInWindow.x
+        let now = Date()
+        if let last = strokes.last {
+            let dx = x - last.x
+            if abs(dx) > 3 {
+                let dir: CGFloat = dx > 0 ? 1 : -1
+                if dir != lastStrokeDir {
+                    lastStrokeDir = dir
+                    strokes.append((x, now))
+                } else {
+                    strokes[strokes.count - 1] = (x, last.at)
+                }
+            }
+        } else {
+            strokes.append((x, now))
+        }
+        strokes.removeAll { now.timeIntervalSince($0.at) > 1.5 }
+        if strokes.count >= 5, now.timeIntervalSince(lastPetted) > 2.5 {
+            lastPetted = now
+            strokes.removeAll()
+            blissEyes()
+            onPetted?()
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        strokes.removeAll()
+    }
 
     override func mouseDown(with event: NSEvent) {
         guard let window else { return }
@@ -212,6 +489,7 @@ final class PetView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         guard let window, let off = dragOffset else { return }
+        if !dragged { onDragStart?() }
         dragged = true
         let m = NSEvent.mouseLocation
         window.setFrameOrigin(NSPoint(x: m.x - off.x, y: m.y - off.y))
@@ -219,7 +497,7 @@ final class PetView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         dragOffset = nil
-        if !dragged { onClick?() }
+        if dragged { onDrop?() } else { onClick?() }
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -227,14 +505,24 @@ final class PetView: NSView {
     }
 }
 
-/// Janela do pet e o passeio pela base da tela.
+/// Janela do pet, gravidade, passeios e a vida em cima da Dock.
 @MainActor
 final class PetController {
     let window: NSPanel
     let view: PetView
+    /// Topo da Dock (embaixo) e sua faixa horizontal, se estiver à vista.
+    var shelf: () -> (y: CGFloat, x: ClosedRange<CGFloat>)? = { nil }
+    var iconX: (String) -> CGFloat? = { _ in nil }
+    var randomIcon: () -> String? = { nil }
+    var nudge: (String) -> Void = { _ in }
+    var onEvent: (String) -> Void = { _ in }
+
     private var walkTimer: Timer?
     private var celebrateUntil = Date.distantPast
-    private var base: Mood = .idle
+    private var taskMood: Mood?
+    private var mindMood: Mood = .idle
+    private var moving = false
+    private let foot: CGFloat = 5
 
     init() {
         let size = NSSize(width: 84, height: 88)
@@ -247,7 +535,8 @@ final class PetController {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
-        window.level = .floating
+        // Acima da Dock, para poder ficar em cima dela.
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
         view = PetView(frame: NSRect(origin: .zero, size: size))
         window.contentView = view
@@ -255,48 +544,191 @@ final class PetController {
             window.setFrameOrigin(NSPoint(x: screen.maxX - 220, y: screen.minY))
         }
         window.orderFrontRegardless()
+        view.onDragStart = { [weak self] in
+            self?.moving = false
+            self?.view.walking(false)
+            self?.onEvent("pet_drag")
+        }
+        view.onDrop = { [weak self] in self?.settle(animated: true) }
+        view.onPetted = { [weak self] in
+            self?.celebrate(.happy, seconds: 1.6)
+            self?.onEvent("pet_petted")
+        }
         scheduleWalk()
     }
 
-    /// `tasks` define o humor; o sucesso vira uma comemoração curta.
+    // MARK: Humor
+
+    /// `tasks` define o humor principal; o sucesso vira uma comemoração curta.
     func update(tasks: [TaskItem], finished: String?) {
         if tasks.contains(where: { $0.status == "awaiting_approval" }) {
-            base = .waiting
+            taskMood = .waiting
         } else if tasks.contains(where: \.isActive) {
-            base = .thinking
+            taskMood = .thinking
         } else {
-            base = .idle
+            taskMood = nil
         }
         if finished == "done" {
-            celebrateUntil = Date().addingTimeInterval(1.8)
-            set(.happy)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.85) { [weak self] in self?.refresh() }
+            celebrate(.happy, seconds: 1.8)
         } else if finished == "failed" {
-            celebrateUntil = Date().addingTimeInterval(4)
-            set(.sad)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4.05) { [weak self] in self?.refresh() }
+            celebrate(.sad, seconds: 4)
         } else {
             refresh()
         }
     }
 
+    /// Humor que vem da mente no core.
+    func setMind(_ mood: String, sleeping: Bool) {
+        mindMood = switch sleeping ? "dormindo" : mood {
+        case "dormindo": .sleeping
+        case "feliz": .idle
+        case "curiosa": .curious
+        case "entediada": .bored
+        case "cansada": .tired
+        case "carente": .lonely
+        case "focada": .focused
+        default: .idle
+        }
+        refresh()
+    }
+
+    func celebrate(_ mood: Mood, seconds: Double) {
+        celebrateUntil = Date().addingTimeInterval(seconds)
+        set(mood)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.05) { [weak self] in self?.refresh() }
+    }
+
     private func refresh() {
         guard Date() >= celebrateUntil else { return }
-        set(base == .idle && systemIdleSeconds() > 180 ? .sleeping : base)
+        set(taskMood ?? mindMood)
     }
 
     private func set(_ mood: Mood) {
         if view.mood != mood { view.apply(mood) }
     }
 
-    private func systemIdleSeconds() -> Double {
-        CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+    func wear(_ outfit: OutfitData?) {
+        view.wear(outfit)
+    }
+
+    // MARK: Chão e movimento
+
+    private var screen: NSRect { (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero }
+
+    /// Onde ela fica de pé num dado x: em cima da Dock ou na base da tela.
+    private func floorY(_ centerX: CGFloat) -> CGFloat {
+        if let s = shelf(), s.x.contains(centerX) { return s.y - foot }
+        return screen.minY
+    }
+
+    private func clampX(_ centerX: CGFloat) -> CGFloat {
+        min(max(centerX, screen.minX + window.frame.width / 2), screen.maxX - window.frame.width / 2)
+    }
+
+    /// Cai (ou sobe) até o chão onde está. Usado ao soltar e quando a Dock muda.
+    func settle(animated: Bool) {
+        guard !moving, NSEvent.pressedMouseButtons == 0 else { return }
+        var f = window.frame
+        let y = floorY(f.midX)
+        guard abs(f.minY - y) > 0.5 else { return }
+        let fall = f.minY - y
+        f.origin.y = y
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = min(0.5, max(0.15, Double(abs(fall)) / 1400))
+                ctx.timingFunction = CAMediaTimingFunction(name: fall > 0 ? .easeIn : .easeOut)
+                window.animator().setFrame(f, display: false)
+            }
+        } else {
+            window.setFrame(f, display: false)
+        }
+    }
+
+    /// Anda até um x, pulando para cima ou para baixo da Dock no caminho.
+    func go(to centerX: CGFloat, speed: CGFloat = 90, then done: (() -> Void)? = nil) {
+        guard NSEvent.pressedMouseButtons == 0 else { return }
+        let target = clampX(centerX)
+        let start = window.frame.midX
+        guard abs(target - start) > 2 else {
+            done?()
+            return
+        }
+        let dir: CGFloat = target > start ? 1 : -1
+        view.look(dir)
+        moving = true
+        view.walking(true)
+        var stops: [CGFloat] = []
+        if let s = shelf() {
+            for edge in [s.x.lowerBound, s.x.upperBound] where (edge - start) * dir > 0 && (target - edge) * dir > 0 {
+                stops.append(edge)
+            }
+            stops.sort { ($0 - start) * dir < ($1 - start) * dir }
+        }
+        stops.append(target)
+        step(stops, dir: dir, speed: speed) { [weak self] in
+            self?.moving = false
+            self?.view.walking(false)
+            self?.view.look(0)
+            done?()
+        }
+    }
+
+    private func step(_ stops: [CGFloat], dir: CGFloat, speed: CGFloat, done: @escaping () -> Void) {
+        guard let next = stops.first else {
+            done()
+            return
+        }
+        var f = window.frame
+        let distance = abs(next - f.midX)
+        f.origin.x = next - f.width / 2
+        // Na beirada da Dock, o chão do outro lado decide: sobe ou desce num pulo.
+        let landing = floorY(next + dir * 2)
+        let hop = abs(landing - f.minY) > 1
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = Double(distance / speed)
+            ctx.timingFunction = CAMediaTimingFunction(name: .linear)
+            window.animator().setFrame(f, display: false)
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.moving else { return }
+                if hop {
+                    var g = self.window.frame
+                    g.origin.x += dir * 6
+                    g.origin.y = landing
+                    NSAnimationContext.runAnimationGroup({ ctx in
+                        ctx.duration = 0.2
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        self.window.animator().setFrame(g, display: false)
+                    }, completionHandler: {
+                        MainActor.assumeIsolated { self.step(Array(stops.dropFirst()), dir: dir, speed: speed, done: done) }
+                    })
+                } else {
+                    self.step(Array(stops.dropFirst()), dir: dir, speed: speed, done: done)
+                }
+            }
+        })
+    }
+
+    /// Alguém abriu um app pela Dock: ela corre até o ícone e comemora.
+    func appOpened(_ id: String) {
+        guard let x = iconX(id), view.mood != .sleeping else { return }
+        go(to: x, speed: 320) { [weak self] in
+            self?.nudge(id)
+            self?.celebrate(.happy, seconds: 1.2)
+        }
+    }
+
+    /// Troca de ambiente: um giro de alegria.
+    func environmentChanged() {
+        view.spin()
+        celebrate(.happy, seconds: 1)
     }
 
     private func scheduleWalk() {
-        let t = Timer(timeInterval: .random(in: 20...55), repeats: false) { [weak self] _ in
+        // Andar custa CPU (a janela é animada quadro a quadro): passeios espaçados.
+        let t = Timer(timeInterval: .random(in: 45...120), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.walk()
+                self?.wander()
                 self?.scheduleWalk()
             }
         }
@@ -305,25 +737,18 @@ final class PetController {
         walkTimer = t
     }
 
-    private func walk() {
-        refresh()
-        guard view.mood == .idle, !isDragging, let screen = window.screen?.visibleFrame else { return }
-        let dx = CGFloat.random(in: 50...180) * (Bool.random() ? 1 : -1)
-        var target = window.frame
-        target.origin.x = min(max(target.minX + dx, screen.minX), screen.maxX - target.width)
-        // Não passeia por cima da Dock: para na beirada do lado em que está.
-        if let r = keepOut?(), target.maxX > r.lowerBound, target.minX < r.upperBound {
-            target.origin.x = window.frame.midX < (r.lowerBound + r.upperBound) / 2 ? r.lowerBound - target.width : r.upperBound
-            target.origin.x = min(max(target.minX, screen.minX), screen.maxX - target.width)
+    /// Passeio à toa. Curiosa ou entediada, vai mexer num ícone da Dock.
+    private func wander() {
+        guard !moving, [.idle, .curious, .bored].contains(view.mood), NSEvent.pressedMouseButtons == 0 else { return }
+        let restless = view.mood == .curious || view.mood == .bored
+        if restless || Bool.random(), let id = randomIcon(), let x = iconX(id) {
+            go(to: x) { [weak self] in
+                self?.nudge(id)
+                self?.onEvent("pet_visit")
+            }
+            return
         }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = Double(abs(dx)) / 70
-            window.animator().setFrame(target, display: false)
-        }
+        let dx = CGFloat.random(in: 60...200) * (Bool.random() ? 1 : -1)
+        go(to: window.frame.midX + dx)
     }
-
-    private var isDragging: Bool { NSEvent.pressedMouseButtons != 0 }
-
-    /// Faixa horizontal da tela que o pet evita ao passear.
-    var keepOut: (() -> ClosedRange<CGFloat>?)?
 }

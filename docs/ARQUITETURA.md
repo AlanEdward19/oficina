@@ -46,7 +46,36 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
   Só números ficam em memória, nunca o texto das conversas. Contam entrada, saída e criação de cache;
   leitura de cache não entra. Cobrem o Claude Code neste Mac, enquanto os limites incluem também o claude.ai.
 
+## Mente da Faísca
+
+Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
+
+- **Sentidos:** app em foco (só o nome), tempo sem mexer no Mac, tarefas, gestos no pet, troca de ambiente.
+  Nunca títulos de janela nem conteúdo de tela.
+- **Rede:** 12 canais → 49 interneurônios de disparo (integra e dispara, com vazamento) → 7 impulsos
+  (alegria, curiosidade, tédio, cansaço, carência, foco, iniciativa). Os pesos iniciais seguem afinidades
+  desenhadas à mão; os pesos interneurônio → impulso aprendem por recompensa (carinho, iniciativas aceitas
+  ou recusadas, tarefas que deram certo), com traços de elegibilidade.
+- **Corpo:** energia que cai acordada e volta dormindo; dorme com cansaço, noite ou ausência longa.
+- **Memória:** tempo por app e por hora, palavras recorrentes nos pedidos, fatos ditos com "lembre que…",
+  roupinhas. Um resumo vai para o cérebro em cada conversa. "Esquecer tudo" apaga o pessoal.
+- **Iniciativas:** quando o impulso de iniciativa sobe e você não está concentrado, escolhe entre roupinha
+  (se o assunto é IA), abrir um app do seu horário, pausa depois de 1h30 de trabalho ou pesquisa na nuvem
+  sobre um interesse. Um bandit aprende o que você aceita. Tudo que gasta tokens pergunta antes.
+- **Roupinhas:** o Claude escolhe peças de um vocabulário fixo e cores; o app só desenha o que é válido.
+
+## Dock
+
+- Segue Mesa e Dock do macOS: ocultar automaticamente, tamanho, ampliação e posição.
+- "Substituir a Dock do macOS" guarda os valores originais, liga ocultar com atraso de 1000 s na Dock do
+  sistema e reinicia a Dock. Ao sair da Oficina, devolve tudo com a sua escolha mais recente. Se a Oficina
+  fechar à força com a substituição ligada:
+  `defaults delete com.apple.dock autohide-delay && killall Dock`
+
 ## Limites conhecidos
+
+- **CPU do app:** parado fica perto de 0%, mas cada passeio da Faísca anima a janela quadro a quadro.
+  O próximo passo é animar por Core Animation dentro de uma janela maior.
 
 - **Nuvem:** o `--cloud` exige terminal, então o core o executa num pseudo-terminal (`script`) e guarda o link.
   É frágil a mudanças no CLI. Não há API de status: "concluída" quer dizer sessão aberta, e o acompanhamento é

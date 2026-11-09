@@ -19,6 +19,11 @@ if [ "$prompt" = "/usage" ]; then
   echo '{"type":"result","result":"ok","is_error":false}'
   exit 0
 fi
+case "$prompt" in
+  *"roupinhas para a Faísca"*)
+    echo '{"type":"result","result":"Claro! {\"name\":\"AI Engineer\",\"body\":\"#FF9E29\",\"head\":{\"shape\":\"headset\",\"color\":\"#222222\"},\"face\":{\"shape\":\"glasses_round\",\"color\":\"#111111\"},\"neck\":{\"shape\":\"lanyard\",\"color\":\"#3366FF\"},\"badge\":{\"shape\":\"AI\",\"color\":\"#00AAFF\"},\"prop\":\"laptop\"}","is_error":false}'
+    exit 0 ;;
+esac
 delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$1"; }
 echo '{"type":"system","subtype":"init","session_id":"sess-1"}'
 

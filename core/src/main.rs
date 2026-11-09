@@ -1,5 +1,6 @@
 mod config;
 mod engine;
+mod mind;
 mod route;
 mod store;
 mod usage;
@@ -120,6 +121,47 @@ async fn usage_refresh(State(app): State<App>) -> impl IntoResponse {
     Json(app.engine.usage(true))
 }
 
+async fn mind(State(app): State<App>) -> impl IntoResponse {
+    Json(app.engine.mind.snapshot())
+}
+
+async fn mind_events(State(app): State<App>, Json(events): Json<Vec<mind::MindEvent>>) -> StatusCode {
+    app.engine.mind.events(events);
+    StatusCode::NO_CONTENT
+}
+
+async fn mind_suggest(State(app): State<App>) -> Response {
+    match app.engine.mind.suggest() {
+        Some(i) => Json(i).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+async fn initiative_accept(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.accept_initiative(&id) {
+        Some(i) => Json(i).into_response(),
+        None => StatusCode::CONFLICT.into_response(),
+    }
+}
+
+async fn initiative_decline(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.mind.decline(&id) { StatusCode::NO_CONTENT } else { StatusCode::CONFLICT }
+}
+
+async fn mind_forget(State(app): State<App>) -> StatusCode {
+    app.engine.mind.forget();
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct Wear {
+    id: Option<String>,
+}
+
+async fn mind_wear(State(app): State<App>, Json(w): Json<Wear>) -> StatusCode {
+    if app.engine.mind.wear(w.id.as_deref()) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
 async fn brain_reset(State(app): State<App>) -> StatusCode {
     app.engine.reset_brain().await;
     StatusCode::NO_CONTENT
@@ -148,6 +190,16 @@ async fn main() {
     let store = store::Store::open(paths.state());
     tokio::spawn(store.clone().persist_loop());
     let engine = Engine::new(store.clone(), cfg, paths);
+    let mind_ref = engine.mind.clone();
+    let ticking = engine.mind.clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_millis(500));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            every.tick().await;
+            ticking.tick();
+        }
+    });
     let app = App {
         engine,
         token: token.into(),
@@ -162,6 +214,13 @@ async fn main() {
         .route("/v1/tasks/{id}/cancel", post(cancel))
         .route("/v1/events", get(events))
         .route("/v1/brain/reset", post(brain_reset))
+        .route("/v1/mind", get(mind))
+        .route("/v1/mind/events", post(mind_events))
+        .route("/v1/mind/suggest", post(mind_suggest))
+        .route("/v1/mind/forget", post(mind_forget))
+        .route("/v1/mind/outfit", post(mind_wear))
+        .route("/v1/mind/initiatives/{id}/accept", post(initiative_accept))
+        .route("/v1/mind/initiatives/{id}/decline", post(initiative_decline))
         .route("/v1/usage", get(usage))
         .route("/v1/usage/refresh", post(usage_refresh))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
@@ -185,6 +244,7 @@ async fn main() {
         _ = int.recv() => {}
     }
     let _ = store.flush();
+    mind_ref.flush();
 }
 
 #[cfg(test)]

@@ -101,6 +101,30 @@ curl -s -o /dev/null -H "$au" http://127.0.0.1:7903/v1/usage; sleep 0.3
 equal 'cache evita rodar de novo' "$calls" "$(grep -c 'no-session-persistence' "$tmp/args.log")"
 kill $pu 2>/dev/null
 
+echo 'mente'
+py() { python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
+mind() { api http://127.0.0.1:7901/v1/mind; }
+check 'estado da mente' '"drives"' "$(mind)"
+check 'aceita eventos' 204 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '[{"kind":"pet_petted"},{"kind":"app_focus","bundle":"com.anthropic.claude","name":"Claude"},{"kind":"presence","idle":3,"running":["com.apple.Safari"]}]' http://127.0.0.1:7901/v1/mind/events)"
+id=$(send '{"text":"lembre que o painel da cozinha usa ESP32"}'); wait_for "$id" done >/dev/null
+check 'lembra do fato' 'painel da cozinha usa ESP32' "$(mind | py 'd["memory"]["facts"]')"
+check 'cérebro recebe a memória' 'painel da cozinha usa ESP32' "$(grep -- '--system-prompt' "$tmp/args.log" | tail -1)"
+for t in 'quero um agente de IA' 'como treinar um modelo de IA com LLM'; do id=$(send "{\"text\":\"/chat $t\"}"); wait_for "$id" done >/dev/null; done
+sug=$(api -X POST http://127.0.0.1:7901/v1/mind/suggest)
+check 'propõe roupinha de IA' '"kind":"outfit"' "$sug"
+check 'avisa que gasta tokens' 'tokens' "$sug"
+iid=$(echo "$sug" | py 'd["id"]')
+check 'aceitar devolve a ação' '"type":"outfit"' "$(api -X POST http://127.0.0.1:7901/v1/mind/initiatives/$iid/accept)"
+check 'aceitar duas vezes: 409' 409 "$(api -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7901/v1/mind/initiatives/$iid/accept)"
+for _ in $(seq 1 40); do o=$(mind | py 'd["outfit"]["name"] if d.get("outfit") else ""'); [ -n "$o" ] && break; sleep 0.1; done
+equal 'veste a roupinha criada' 'AI Engineer' "$o"
+check 'tarefa visível no chat' 'Vesti a roupinha' "$(api http://127.0.0.1:7901/v1/tasks | py '[t["output"] for t in d if t["text"].startswith("Criar roupinha")]')"
+check 'pede ao Claude sem ferramentas' 'no-session-persistence' "$(grep -B0 -- '--tools  --setting-sources  --no-session' "$tmp/args.log" | tail -1)"
+check 'tirar a roupinha' 204 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"id":null}' http://127.0.0.1:7901/v1/mind/outfit)"
+check 'esquecer' 204 "$(api -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7901/v1/mind/forget)"
+equal 'sem fatos depois de esquecer' '[]' "$(mind | py 'd["memory"]["facts"]')"
+check 'roupinhas continuam guardadas' 'AI Engineer' "$(mind | py '[o["name"] for o in d["outfits"]]')"
+
 echo 'persistência'
 last=$(send '{"text":"guardar"}'); wait_for "$last" done >/dev/null; sleep 1.3
 kill "$pa"; wait "$pa" 2>/dev/null

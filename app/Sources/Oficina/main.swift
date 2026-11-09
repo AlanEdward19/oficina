@@ -9,6 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pet: PetController!
     private var notch: NotchController!
     private var dock: DockController!
+    private var bubble: BubbleController!
+    private var mindPanel: NSPanel?
+    private var presenceTimer: Timer?
     private var usageTimer: Timer?
     private var panel: KeyPanel!
     private var status: NSStatusItem!
@@ -17,15 +20,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        if CommandLine.arguments.contains("--testar-dock-sistema") {
+            SystemDock.selfTest()
+            exit(0)
+        }
         pet = PetController()
-        pet.view.onClick = { [weak self] in self?.togglePanel() }
+        pet.view.onClick = { [weak self] in
+            self?.core.mindEvents([["kind": "pet_click"]])
+            self?.togglePanel()
+        }
+        pet.onEvent = { [weak self] kind in self?.core.mindEvents([["kind": kind]]) }
+        bubble = BubbleController(anchor: pet.window)
+        bubble.model.answer = { [weak self] initiative, accepted in self?.answer(initiative, accepted) }
         pet.view.onMenu = { [weak self] event in self?.showMenu(event) }
         let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Oficina")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let dockStore = DockStore(home: home)
         dockStore.openChat = { [weak self] in self?.openChat() }
         dock = DockController(store: dockStore) { [weak self] title, initial, done in self?.askName(title, initial, done) }
-        pet.keepOut = { [weak self] in self?.dock.occupiedX }
+        wirePetToDock()
         notch = NotchController()
         notch.model.act = { [weak self] id, action in self?.core.act(id, action) }
         notch.model.openChat = { [weak self] in
@@ -58,14 +71,136 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer.tolerance = 60
         RunLoop.main.add(timer, forMode: .common)
         usageTimer = timer
+        core.$mind
+            .receive(on: RunLoop.main)
+            .removeDuplicates()
+            .sink { [weak self] brief in MainActor.assumeIsolated { self?.mindChanged(brief) } }
+            .store(in: &bag)
+        watchPresence()
         core.start()
+        if CommandLine.arguments.contains("--abrir-mente") { openMind() }
+        if CommandLine.arguments.contains("--visitar-dock") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                guard let self, let id = self.dock.store.allIDs.dropFirst().first else { return }
+                self.pet.appOpened(id)
+            }
+        }
         if CommandLine.arguments.contains("--abrir-notch") { notch.setExpanded(true) }
         if CommandLine.arguments.contains("--abrir-conversa") { togglePanel() }
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        // A Dock do macOS volta enquanto a Oficina estiver fechada.
+        SystemDock.restore(keepChoice: true)
         core.stop()
     }
+
+    // MARK: Faísca e Dock
+
+    private func wirePetToDock() {
+        pet.shelf = { [weak self] in self?.dock.shelf }
+        pet.iconX = { [weak self] id in self?.dock.iconX(id) }
+        pet.randomIcon = { [weak self] in self?.dock.store.allIDs.randomElement() }
+        pet.nudge = { [weak self] id in self?.dock.store.nudge(id) }
+        dock.onLayout = { [weak self] in self?.pet.settle(animated: true) }
+        dock.store.onOpen = { [weak self] id in
+            self?.core.mindEvents([["kind": "dock_open", "bundle": id]])
+            self?.pet.appOpened(id)
+        }
+        dock.store.onSwitch = { [weak self] env in
+            self?.core.mindEvents([["kind": "env_switch", "name": env.name]])
+            self?.pet.environmentChanged()
+        }
+        DispatchQueue.main.async { [weak self] in self?.pet.settle(animated: false) }
+    }
+
+    // MARK: Mente
+
+    /// Conta à mente o app em foco e, a cada minuto, se você está por perto.
+    /// Só nomes de apps e tempo parado: nunca títulos de janela ou conteúdo.
+    private func watchPresence() {
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier else { return }
+            let name = app.localizedName ?? id
+            MainActor.assumeIsolated { self?.core.mindEvents([["kind": "app_focus", "bundle": id, "name": name]]) }
+        }
+        let t = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reportPresence() }
+        }
+        t.tolerance = 10
+        RunLoop.main.add(t, forMode: .common)
+        presenceTimer = t
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.reportPresence(includeFocus: true) }
+    }
+
+    private func reportPresence(includeFocus: Bool = false) {
+        let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+        let running = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap(\.bundleIdentifier)
+        var events: [[String: Any]] = [["kind": "presence", "idle": idle, "running": running]]
+        if includeFocus, let app = NSWorkspace.shared.frontmostApplication, let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier {
+            events.append(["kind": "app_focus", "bundle": id, "name": app.localizedName ?? id])
+        }
+        core.mindEvents(events)
+        dock.syncSystemSettings()
+    }
+
+    private var lastBrief: MindBrief?
+
+    private func mindChanged(_ brief: MindBrief?) {
+        guard let brief else { return }
+        defer { lastBrief = brief }
+        pet.setMind(brief.mood, sleeping: brief.sleeping)
+        if brief.outfit != lastBrief?.outfit { pet.wear(brief.outfit) }
+        if brief.initiative != lastBrief?.initiative { bubble.ask(brief.initiative) }
+        if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, !brief.sleeping, brief.mood != "focada" {
+            let important = t.text.hasPrefix("Olha minha") || t.text.hasPrefix("Anotado") || t.text.hasPrefix("Modo ")
+            bubble.say(t.text, force: important)
+        }
+    }
+
+    private func answer(_ initiative: InitiativeData, _ accepted: Bool) {
+        bubble.ask(nil)
+        Task {
+            guard let done = await core.answer(initiative.id, accept: accepted), accepted else { return }
+            switch done.action.type {
+            case "open_app":
+                if let id = done.action.bundle { dock.store.open(id) }
+            case "chat":
+                openChat()
+            case "outfit":
+                bubble.say("Já volto com a roupa nova!", force: true)
+            case "task":
+                bubble.say("Mandei um agente pesquisar. Te aviso.", force: true)
+            default:
+                break
+            }
+        }
+    }
+
+    @objc private func openMind() {
+        if let p = mindPanel {
+            p.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 640),
+                        styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+        p.title = "Mente da Faísca"
+        p.titlebarAppearsTransparent = true
+        p.isReleasedWhenClosed = false
+        p.contentView = NSHostingView(rootView: MindView(core: core))
+        p.center()
+        mindPanel = p
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: p, queue: .main) { [weak self] _ in
+            // Fechar libera a tela, que para de consultar a mente.
+            MainActor.assumeIsolated { self?.mindPanel = nil }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        p.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func suggestNow() { core.suggest() }
 
     private func tasksChanged(_ tasks: [TaskItem]) {
         var finished: String?
@@ -176,12 +311,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         chat.keyEquivalentModifierMask = [.control, .option]
         chat.target = self
         menu.addItem(chat)
+        let mind = NSMenuItem(title: "Mente da Faísca…", action: #selector(openMind), keyEquivalent: "")
+        mind.target = self
+        menu.addItem(mind)
+        let suggest = NSMenuItem(title: "Me sugere algo", action: #selector(suggestNow), keyEquivalent: "")
+        suggest.target = self
+        menu.addItem(suggest)
         let dockItem = NSMenuItem(title: "Dock", action: nil, keyEquivalent: "")
         let dockMenu = NSMenu()
         let showDock = NSMenuItem(title: "Mostrar Dock", action: #selector(toggleDock), keyEquivalent: "")
         showDock.target = self
         showDock.state = dock.enabled ? .on : .off
         dockMenu.addItem(showDock)
+        let replace = NSMenuItem(title: "Substituir a Dock do macOS", action: #selector(toggleReplace), keyEquivalent: "")
+        replace.target = self
+        replace.state = dock.replacingSystemDock ? .on : .off
+        dockMenu.addItem(replace)
         dockMenu.addItem(.separator())
         for (i, env) in dock.store.envs.enumerated() {
             let item = NSMenuItem(title: env.name, action: #selector(pickEnvironment(_:)), keyEquivalent: i < 9 ? "\(i + 1)" : "")
@@ -204,6 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleDock() { dock.enabled.toggle() }
+    @objc private func toggleReplace() { dock.replacingSystemDock.toggle() }
     @objc private func pickEnvironment(_ sender: NSMenuItem) { dock.store.switchTo(sender.tag) }
 
     func askName(_ title: String, _ initial: String, _ done: @escaping (String) -> Void) {

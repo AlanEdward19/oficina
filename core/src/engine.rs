@@ -1,5 +1,6 @@
 use crate::{
     config::{Config, Paths, Peer},
+    mind::{Action, Initiative, Mind, outfit},
     route::{self, CliEvent, Dest, Holdback},
     store::{Event, Status, Store, Target, Task},
     usage::{self, Scanner, Usage},
@@ -43,6 +44,7 @@ pub struct Engine {
     usage: Mutex<Usage>,
     scanner: Arc<Mutex<Scanner>>,
     refreshing: AtomicBool,
+    pub mind: Arc<Mind>,
 }
 
 #[derive(Serialize)]
@@ -142,7 +144,9 @@ const STREAM_ARGS: [&str; 6] = [
 impl Engine {
     pub fn new(store: Arc<Store>, cfg: Config, paths: Paths) -> Arc<Self> {
         let local = Semaphore::new(cfg.max_local_tasks.max(1));
+        let mind = Arc::new(Mind::open(paths.home.join("mind.json"), store.tx.clone()));
         Arc::new(Self {
+            mind,
             store,
             cfg,
             paths,
@@ -171,6 +175,7 @@ impl Engine {
         if text.is_empty() {
             return Err("mensagem vazia".into());
         }
+        self.mind.observe_task(&text);
         let task = self.store.create(text, target, machine);
         let (me, id) = (self.clone(), task.id.clone());
         tokio::spawn(async move { me.run(id).await });
@@ -231,11 +236,16 @@ impl Engine {
                 t.status = Status::Running;
             }
         });
-        t.is_some_and(|t| t.status == Status::Running)
+        let running = t.is_some_and(|t| t.status == Status::Running);
+        if running {
+            self.mind.task_started(id);
+        }
+        running
     }
 
     fn finish(&self, id: &str, result: Result<Option<String>, String>) {
-        self.store.update(id, |t| {
+        let ok = result.is_ok();
+        let done = self.store.update(id, |t| {
             if t.status == Status::Cancelled {
                 return;
             }
@@ -252,6 +262,75 @@ impl Engine {
                 }
             }
         });
+        match done.map(|t| t.status) {
+            Some(Status::Cancelled) | None => self.mind.task_dropped(id),
+            _ => self.mind.task_finished(id, ok),
+        }
+    }
+
+    /// O usuário aceitou uma iniciativa: o core faz a parte que é dele.
+    pub fn accept_initiative(self: &Arc<Self>, id: &str) -> Option<Initiative> {
+        let initiative = self.mind.accept(id)?;
+        match &initiative.action {
+            Action::Outfit { theme } => {
+                let task = self.store.create(format!("Criar roupinha: {theme}"), Target::Chat, None);
+                let (me, theme) = (self.clone(), theme.clone());
+                tokio::spawn(async move { me.run_outfit(&task.id, &theme).await });
+            }
+            Action::Task { text, target } => {
+                let _ = self.submit(text, *target, None);
+            }
+            _ => {}
+        }
+        Some(initiative)
+    }
+
+    /// Pede ao Claude as peças da roupinha; o app só desenha o que é válido.
+    async fn run_outfit(self: &Arc<Self>, id: &str, theme: &str) {
+        if !self.start(id) {
+            return;
+        }
+        let result = match self.ask(&outfit::prompt(theme)).await {
+            Ok(text) => {
+                let oid = format!("o{:x}", usage::now());
+                match outfit::parse(&text, theme, oid, usage::now()) {
+                    Ok(o) => {
+                        let name = o.name.clone();
+                        self.mind.add_outfit(o);
+                        Ok(Some(format!("Pronto! Vesti a roupinha \"{name}\". Ficou bom?")))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+        self.finish(id, result);
+    }
+
+    /// Uma pergunta avulsa ao Claude, sem ferramentas e sem conversa.
+    async fn ask(&self, prompt: &str) -> Result<String, String> {
+        let mut cmd = claude_cmd(&self.claude);
+        cmd.current_dir(self.paths.brain_dir())
+            .args(STREAM_ARGS)
+            .args(["--model", &self.cfg.brain_model, "--tools", "", "--setting-sources", "", "--no-session-persistence"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| format!("Não consegui executar o claude: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(prompt.as_bytes()).await;
+        }
+        let out = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output())
+            .await
+            .map_err(|_| "O Claude demorou demais.".to_string())?
+            .map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if let CliEvent::Result { text, is_error, .. } = route::parse_line(line) {
+                return if is_error { Err(tail(&text)) } else { Ok(text) };
+            }
+        }
+        Err("O Claude não respondeu.".into())
     }
 
     async fn run_brain(self: &Arc<Self>, id: &str, text: &str, delegate: bool) {
@@ -259,10 +338,12 @@ impl Engine {
             return;
         }
         let mut session = self.brain.lock().await;
+        let memory = self.mind.summary();
+        let memory = if memory.is_empty() { String::new() } else { format!(" Memória sobre o usuário (use com naturalidade, sem recitar): {memory}") };
         let system = if delegate {
-            format!("{BRAIN_BASE}{BRAIN_DELEGATE}")
+            format!("{BRAIN_BASE}{memory}{BRAIN_DELEGATE}")
         } else {
-            BRAIN_BASE.to_string()
+            format!("{BRAIN_BASE}{memory}")
         };
         let mut cmd = claude_cmd(&self.claude);
         cmd.current_dir(self.paths.brain_dir())

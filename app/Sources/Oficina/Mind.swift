@@ -1,0 +1,391 @@
+import AppKit
+import SwiftUI
+
+// MARK: Modelos
+
+struct OutfitPiece: Decodable, Equatable {
+    let shape: String
+    let color: String
+}
+
+struct OutfitData: Decodable, Equatable, Identifiable {
+    let id: String
+    let name: String
+    let theme: String
+    let body: String
+    let head: OutfitPiece
+    let face: OutfitPiece
+    let neck: OutfitPiece
+    let badge: OutfitPiece?
+    let prop: String
+}
+
+struct ThoughtData: Decodable, Equatable {
+    let text: String
+    let at: UInt64
+}
+
+struct InitiativeAction: Decodable, Equatable {
+    let type: String
+    let bundle: String?
+    let name: String?
+    let theme: String?
+    let text: String?
+}
+
+struct InitiativeData: Decodable, Equatable, Identifiable {
+    let id: String
+    let kind: String
+    let text: String
+    let accept: String
+    let decline: String
+    let action: InitiativeAction
+}
+
+struct MindBrief: Decodable, Equatable {
+    let mood: String
+    let sleeping: Bool
+    let thought: ThoughtData?
+    let initiative: InitiativeData?
+    let outfit: OutfitData?
+}
+
+struct NamedValue: Decodable {
+    let name: String
+    let value: Double
+}
+
+struct AppUse: Decodable {
+    let name: String
+    let minutes: Double
+    let ai: Bool
+}
+
+struct InterestData: Decodable {
+    let word: String
+    let count: Int
+}
+
+struct FactData: Decodable {
+    let text: String
+    let at: UInt64
+}
+
+struct MemoryData: Decodable {
+    let apps: [AppUse]
+    let interests: [InterestData]
+    let facts: [FactData]
+    let peak: [Int]?
+}
+
+struct MindSnapshot: Decodable {
+    let mood: String
+    let sleeping: Bool
+    let thought: ThoughtData?
+    let initiative: InitiativeData?
+    let outfit: OutfitData?
+    let energy: Double
+    let drives: [NamedValue]
+    let inputs: [NamedValue]
+    let neurons: [Double]
+    let thoughts: [ThoughtData]
+    let memory: MemoryData
+    let outfits: [OutfitData]
+}
+
+private let driveLabels: [String: String] = [
+    "alegria": "Alegria", "curiosidade": "Curiosidade", "tedio": "Tédio", "cansaco": "Cansaço",
+    "carencia": "Carência", "foco": "Seu foco", "iniciativa": "Iniciativa",
+]
+
+private let inputLabels: [String: String] = [
+    "trabalhando": "Você trabalhando", "ia": "Assunto IA", "ociosidade": "Ociosidade", "tarefa": "Tarefa rodando",
+    "sucesso": "Sucesso", "falha": "Falha", "carinho": "Carinho", "cutucada": "Cutucada", "ignorada": "Ignorada",
+    "noite": "Noite", "novidade": "Novidade", "troca": "Troca de app",
+]
+
+private let groupColors: [Color] = [.yellow, .green, .gray, .brown, .purple, .blue, .orange]
+
+// MARK: Balão de fala
+
+/// O que aparece no balão acima da Faísca.
+@MainActor
+final class BubbleModel: ObservableObject {
+    @Published var text: String?
+    @Published var initiative: InitiativeData?
+    var answer: (InitiativeData, Bool) -> Void = { _, _ in }
+}
+
+struct BubbleView: View {
+    @ObservedObject var model: BubbleModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let i = model.initiative {
+                Text(i.text).font(.callout).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button(i.accept) { model.answer(i, true) }.buttonStyle(.borderedProminent)
+                    Button(i.decline) { model.answer(i, false) }
+                }
+                .controlSize(.small)
+            } else if let t = model.text {
+                Text(t).font(.callout).italic().fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(width: 250, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+        .padding(4)
+        .fixedSize()
+    }
+}
+
+/// Balão que acompanha a Faísca. Pensamentos somem sozinhos; perguntas ficam
+/// até a resposta.
+@MainActor
+final class BubbleController {
+    let model = BubbleModel()
+    private let panel: NSPanel
+    private let host: TrackingHost<BubbleView>
+    private weak var anchor: NSWindow?
+    private var hideWork: DispatchWorkItem?
+    private var lastThoughtShown = Date.distantPast
+
+    init(anchor: NSWindow) {
+        self.anchor = anchor
+        panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        host = TrackingHost(rootView: BubbleView(model: model))
+        panel.contentView = host
+        NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: anchor, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.place() }
+        }
+    }
+
+    func ask(_ initiative: InitiativeData?) {
+        hideWork?.cancel()
+        model.initiative = initiative
+        if initiative == nil, model.text == nil {
+            panel.orderOut(nil)
+        } else {
+            show()
+        }
+    }
+
+    /// Pensamento em voz alta: só de vez em quando, para não incomodar.
+    func say(_ text: String, force: Bool = false) {
+        guard model.initiative == nil else { return }
+        guard force || Date().timeIntervalSince(lastThoughtShown) > 90 else { return }
+        lastThoughtShown = Date()
+        model.text = text
+        show()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.model.initiative == nil else { return }
+            self.model.text = nil
+            self.panel.orderOut(nil)
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+    }
+
+    private func show() {
+        place()
+        panel.orderFrontRegardless()
+    }
+
+    private func place() {
+        guard let a = anchor else { return }
+        host.layoutSubtreeIfNeeded()
+        let size = host.fittingSize
+        let screen = (a.screen ?? NSScreen.main)?.visibleFrame ?? a.frame
+        var x = a.frame.midX - size.width / 2
+        x = min(max(x, screen.minX + 6), screen.maxX - size.width - 6)
+        let y = min(a.frame.maxY - 6, screen.maxY - size.height)
+        panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+    }
+}
+
+// MARK: Painel da mente
+
+struct MindView: View {
+    @ObservedObject var core: Core
+    @State private var snap: MindSnapshot?
+    @State private var confirmForget = false
+
+    var body: some View {
+        ScrollView {
+            if let s = snap {
+                VStack(alignment: .leading, spacing: 18) {
+                    header(s)
+                    section("O que ela sente") { drives(s) }
+                    section("Neurônios") { neurons(s) }
+                    section("O que ela percebe agora") { inputs(s) }
+                    section("Pensamentos") { thoughts(s) }
+                    section("O que ela lembra de você") { memory(s) }
+                    section("Roupinhas") { outfits(s) }
+                }
+                .padding(18)
+            } else {
+                ProgressView().padding(40)
+            }
+        }
+        .frame(width: 460, height: 640)
+        .task {
+            while !Task.isCancelled {
+                if let s = await core.mindSnapshot() { snap = s }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .confirmationDialog("Esquecer tudo o que a Faísca aprendeu sobre você?", isPresented: $confirmForget) {
+            Button("Esquecer tudo", role: .destructive) { core.forgetMind() }
+        } message: {
+            Text("Apaga apps, horários, interesses e fatos. As roupinhas ficam. Não dá para desfazer.")
+        }
+    }
+
+    private func header(_ s: MindSnapshot) -> some View {
+        HStack(spacing: 14) {
+            FaiscaAvatar(size: 54, mood: s.sleeping ? .sleeping : .idle)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(s.sleeping ? "Dormindo" : s.mood.capitalized).font(.title2.weight(.semibold))
+                if let t = s.thought { Text("“\(t.text)”").font(.callout).italic().foregroundStyle(.secondary) }
+                HStack(spacing: 6) {
+                    Text("Energia").font(.caption).foregroundStyle(.secondary)
+                    ProgressView(value: s.energy).frame(width: 120)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.headline)
+            content()
+        }
+    }
+
+    private func bar(_ label: String, _ value: Double, _ color: Color) -> some View {
+        HStack {
+            Text(label).font(.callout).frame(width: 130, alignment: .leading)
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.08))
+                    Capsule().fill(color).frame(width: g.size.width * min(max(value, 0), 1))
+                }
+            }
+            .frame(height: 8)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue("\(Int(value * 100)) por cento")
+    }
+
+    private func drives(_ s: MindSnapshot) -> some View {
+        VStack(spacing: 6) {
+            ForEach(Array(s.drives.enumerated()), id: \.offset) { i, d in
+                bar(driveLabels[d.name] ?? d.name, d.value, groupColors[i % groupColors.count])
+            }
+        }
+    }
+
+    private func neurons(_ s: MindSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(18), spacing: 4), count: 7), spacing: 4) {
+                ForEach(Array(s.neurons.enumerated()), id: \.offset) { i, r in
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(groupColors[i % 7].opacity(0.12 + 0.88 * min(r * 2.5, 1)))
+                        .frame(width: 18, height: 18)
+                }
+            }
+            Text("49 interneurônios de disparo, um grupo por cor de impulso. Mais forte, mais disparos agora.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func inputs(_ s: MindSnapshot) -> some View {
+        VStack(spacing: 6) {
+            ForEach(Array(s.inputs.enumerated()).filter { $0.element.value > 0.02 }, id: \.offset) { _, d in
+                bar(inputLabels[d.name] ?? d.name, d.value, .accentColor)
+            }
+            if s.inputs.allSatisfy({ $0.value <= 0.02 }) {
+                Text("Nada acontecendo agora.").font(.callout).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func thoughts(_ s: MindSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(s.thoughts.prefix(8).enumerated()), id: \.offset) { _, t in
+                HStack(alignment: .top) {
+                    Text(Date(timeIntervalSince1970: TimeInterval(t.at)), format: .dateTime.hour().minute())
+                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    Text(t.text).font(.callout)
+                }
+            }
+            if s.thoughts.isEmpty { Text("Ainda pensando…").font(.callout).foregroundStyle(.secondary) }
+        }
+    }
+
+    private func memory(_ s: MindSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if s.memory.apps.isEmpty && s.memory.interests.isEmpty && s.memory.facts.isEmpty {
+                Text("Ainda conhecendo você. Fica tudo só neste Mac.").font(.callout).foregroundStyle(.secondary)
+            }
+            ForEach(Array(s.memory.apps.enumerated()), id: \.offset) { _, a in
+                HStack {
+                    Text(a.name)
+                    if a.ai { Text("IA").font(.caption2.bold()).padding(.horizontal, 4).background(Color.orange.opacity(0.25), in: Capsule()) }
+                    Spacer()
+                    Text(minutes(a.minutes)).monospacedDigit().foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            }
+            if let p = s.memory.peak, p.count == 2 {
+                Text("Costuma usar o Mac das \(p[0])h às \(p[1])h.").font(.callout)
+            }
+            if !s.memory.interests.isEmpty {
+                Text(s.memory.interests.prefix(10).map { "\($0.word) (\($0.count))" }.joined(separator: " · "))
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            ForEach(Array(s.memory.facts.enumerated()), id: \.offset) { _, f in
+                Label(f.text, systemImage: "pin").font(.callout)
+            }
+            HStack {
+                Button("Me sugere algo") { core.suggest() }
+                Button("Esquecer tudo…", role: .destructive) { confirmForget = true }
+            }
+            .controlSize(.small)
+            Text("Para ela lembrar de algo, diga no chat: “lembre que …”.").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func outfits(_ s: MindSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if s.outfits.isEmpty {
+                Text("Nenhuma ainda. Ela pede antes de gastar tokens para criar uma.").font(.callout).foregroundStyle(.secondary)
+            }
+            ForEach(s.outfits) { o in
+                HStack {
+                    Text(o.name)
+                    Spacer()
+                    if s.outfit?.id == o.id {
+                        Button("Tirar") { core.wear(nil) }
+                    } else {
+                        Button("Vestir") { core.wear(o.id) }
+                    }
+                }
+                .font(.callout)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private func minutes(_ m: Double) -> String {
+        m >= 60 ? String(format: "%.0f h %02.0f min", (m / 60).rounded(.down), m.truncatingRemainder(dividingBy: 60)) : String(format: "%.0f min", m)
+    }
+}

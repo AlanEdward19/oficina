@@ -58,6 +58,7 @@ private struct CoreEvent: Decodable {
     let id: String?
     let text: String?
     let usage: UsageData?
+    let mind: MindBrief?
 }
 
 /// Fala com o `oficinad` e guarda o estado que as telas mostram.
@@ -65,6 +66,7 @@ private struct CoreEvent: Decodable {
 final class Core: ObservableObject {
     @Published private(set) var tasks: [TaskItem] = []
     @Published private(set) var usage: UsageData?
+    @Published private(set) var mind: MindBrief?
     @Published private(set) var connected = false
     @Published private(set) var problem: String?
 
@@ -92,6 +94,9 @@ final class Core: ObservableObject {
                 connected = true
                 problem = nil
                 loadUsage(fresh: false)
+                if let s = await mindSnapshot() {
+                    mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit)
+                }
                 try await listen()
             } catch {
                 problem = "Sem contato com o core."
@@ -168,6 +173,8 @@ final class Core: ObservableObject {
             }
         case "usage":
             if let u = ev.usage { usage = u }
+        case "mind":
+            if let m = ev.mind { mind = m }
         case "delta":
             guard let id = ev.id, let text = ev.text,
                   let i = tasks.firstIndex(where: { $0.id == id }) else { return }
@@ -200,6 +207,47 @@ final class Core: ObservableObject {
             // Antes da primeira leitura o core responde vazio; não apaga nada.
             if usage == nil || !u.models.isEmpty || !u.limits.isEmpty { usage = u }
         }
+    }
+
+    // MARK: Mente
+
+    private func post(_ path: String, json: Any? = nil) async -> Data? {
+        var req = request(path, method: "POST")
+        if let json {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: json)
+        }
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let code = (resp as? HTTPURLResponse)?.statusCode, code < 300 else { return nil }
+        return data
+    }
+
+    /// Conta à mente o que aconteceu (app em foco, presença, gestos no pet).
+    func mindEvents(_ events: [[String: Any]]) {
+        guard connected, !events.isEmpty else { return }
+        Task { _ = await post("mind/events", json: events) }
+    }
+
+    func mindSnapshot() async -> MindSnapshot? {
+        guard let (data, _) = try? await URLSession.shared.data(for: request("mind")) else { return nil }
+        return try? JSONDecoder().decode(MindSnapshot.self, from: data)
+    }
+
+    func suggest() {
+        Task { _ = await post("mind/suggest") }
+    }
+
+    func answer(_ id: String, accept: Bool) async -> InitiativeData? {
+        let data = await post("mind/initiatives/\(id)/\(accept ? "accept" : "decline")")
+        return data.flatMap { try? JSONDecoder().decode(InitiativeData.self, from: $0) }
+    }
+
+    func forgetMind() {
+        Task { _ = await post("mind/forget") }
+    }
+
+    func wear(_ id: String?) {
+        Task { _ = await post("mind/outfit", json: ["id": id as Any]) }
     }
 
     /// A próxima mensagem começa uma conversa nova no cérebro.

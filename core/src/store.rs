@@ -61,6 +61,7 @@ pub enum Event {
     Task { task: Task },
     Delta { id: String, text: String },
     Usage { usage: crate::usage::Usage },
+    Mind { mind: crate::mind::Brief },
 }
 
 pub struct Store {
