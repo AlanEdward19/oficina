@@ -1,71 +1,82 @@
-# Contribuindo com a Oficina
+# Contributing to Oficina
 
-A Oficina é a casa da **Faísca**, uma assistente que vive no Mac. Dá para contribuir com funcionalidades,
-widgets da Dock, roupinhas, casinhas e correções. Este guia diz onde mexer em cada caso.
+Thanks for helping make Oficina better. Oficina is the home of **Faísca**, an assistant that lives on your Mac. This guide covers how to contribute, where things live in the code and what we look for in a pull request.
 
-## Como pedir
+## Ways to contribute
 
-Abra uma issue escolhendo o modelo (funcionalidade, widget, roupa, casa ou bug). A própria Faísca também
-abre issues quando alguém pede uma melhoria pelo chat ou pelo menu **Pedir melhoria…**.
+- **Report a bug** or **request a feature, Dock widget, outfit or house** with the [issue templates](https://github.com/AlanEdward19/oficina/issues/new/choose). Faísca can open these for you too, through the chat or the **Pedir melhoria…** menu item.
+- **Pick up an issue.** Issues labelled [`good first issue`](https://github.com/AlanEdward19/oficina/labels/good%20first%20issue) are small and well scoped; [`help wanted`](https://github.com/AlanEdward19/oficina/labels/help%20wanted) ones are bigger.
+- **Add to Faísca's world**: outfit pieces, beds and blankets, or new Dock widgets.
+- **Improve the docs.**
 
-Issues com a etiqueta **`agente`** são implementadas por um agente do Claude, que abre um pull request.
-Só quem tem permissão de escrita consegue aplicar a etiqueta, então uma pessoa da equipe decide o que vai
-para o agente.
+For larger changes, please open an issue first so we can agree on the approach before you invest time in it.
 
-## Mapa do código
+Issues labelled [`agente`](https://github.com/AlanEdward19/oficina/labels/agente) are implemented by a Claude agent, which opens a pull request. Only people with write access can apply that label, so a maintainer decides what goes to the agent.
 
-| Quero mexer em… | Onde |
+## Development setup
+
+The core is Rust and the app is Swift, with no packages. You need macOS 14 or later, the [Rust toolchain](https://rustup.rs/) and Xcode or the Swift 6 command line tools.
+
+1. Run the core tests: `cd core && cargo test`
+2. Run the end-to-end tests: `cd core && cargo build --release && bash tests/e2e.sh`
+3. Build the app: `cd app && swift build -c release`
+4. Build and open the full app: `bash scripts/build.sh && open build/Oficina.app`
+
+CI runs the first three on every pull request. The end-to-end script uses a fake `claude`, so it spends no tokens. Architecture and decisions are in [docs/ARQUITETURA.md](docs/ARQUITETURA.md).
+
+## Code map
+
+| To change… | Look at |
 |---|---|
-| Roupinhas (peças novas) | Vocabulário em `core/src/mind/outfit.rs` (`HEADS`, `FACES`, `NECKS`, `PROPS`) e desenho em `app/Sources/Oficina/Pet.swift` (`wear`) |
-| Casinhas (caminhas, mantas, enfeites) | Vocabulário em `core/src/mind/decor.rs` (`BEDS`, `BLANKETS`, `EXTRAS`) e desenho em `Pet.swift` (`setDecor`) |
-| Widgets da Dock | `app/Sources/Oficina/Dock.swift`, em `DockView.widgets` |
-| Comportamento e humor da Faísca | Rede e mente em `core/src/mind/` (`net.rs`, `mod.rs`); animações em `Pet.swift` (`PetFigure`) |
-| Iniciativas (o que ela sugere) | `core/src/mind/mod.rs`, função `best` |
-| Conversa, agentes e roteamento | `core/src/engine.rs` e `core/src/route.rs` |
-| Notch e uso do Claude | `app/Sources/Oficina/Notch.swift` e `core/src/usage.rs` |
+| Outfits (new pieces) | Vocabulary in `core/src/mind/outfit.rs` (`HEADS`, `FACES`, `NECKS`, `PROPS`); drawing in `app/Sources/Oficina/Pet.swift` (`wear`) |
+| Houses (beds, blankets, decorations) | Vocabulary in `core/src/mind/decor.rs` (`BEDS`, `BLANKETS`, `EXTRAS`); drawing in `Pet.swift` (`setDecor`) |
+| Dock widgets | `app/Sources/Oficina/Dock.swift`, in `DockView.widgets` |
+| Faísca's behaviour and mood | Network and mind in `core/src/mind/` (`net.rs`, `mod.rs`); animations in `Pet.swift` (`PetFigure`) |
+| Initiatives (what she suggests) | `core/src/mind/mod.rs`, function `best` |
+| Conversation, agents and routing | `core/src/engine.rs` and `core/src/route.rs` |
+| Notch and Claude usage | `app/Sources/Oficina/Notch.swift` and `core/src/usage.rs` |
 | Chat | `app/Sources/Oficina/Chat.swift` |
-| Agentes, equipes, missões e ajustes | `core/src/factory.rs` e `app/Sources/Oficina/Factory.swift` |
-| Escolha automática de modelo | `core/src/router.rs` |
-| Peças compartilhadas das telas (prévia do pet, monograma, modelos) | `app/Sources/Oficina/Theme.swift` |
-| Limpeza de disco | `core/src/clean.rs` e `app/Sources/Oficina/Clean.swift` |
-| Painel da barra de menus e ferramentas | `app/Sources/Oficina/Tools.swift` |
-| Textos no idioma do Mac | `app/Sources/Oficina/L10n.swift` |
+| Agents, teams, missions and settings | `core/src/factory.rs` and `app/Sources/Oficina/Factory.swift` |
+| Automatic model choice | `core/src/router.rs` |
+| Shared screen pieces (pet preview, monogram, models) | `app/Sources/Oficina/Theme.swift` |
+| Disk cleaning | `core/src/clean.rs` and `app/Sources/Oficina/Clean.swift` |
+| Menu bar panel and tools | `app/Sources/Oficina/Tools.swift` |
+| Text in the Mac's language | `app/Sources/Oficina/L10n.swift` |
 
-Uma peça nova de roupinha ou casinha precisa de duas mudanças: o nome entra no vocabulário do core (assim o
-Claude passa a poder escolher a peça) e o desenho entra no `Pet.swift`. Peças fora do vocabulário são
-ignoradas, então o app nunca desenha algo que não conhece.
+A new outfit or house piece needs two changes: its name goes in the core vocabulary, so Claude can choose it, and its drawing goes in `Pet.swift`. Pieces outside the vocabulary are ignored, so the app never draws something it doesn't know.
 
-## Regras
+## Branches and pull requests
 
-- Escreva textos de interface em português do Brasil, curtos e diretos.
-- Tudo que gasta tokens do usuário pede permissão antes.
-- A Faísca não lê conteúdo de tela nem títulos de janela; só nomes de apps e tempo de uso.
-- As telas usam os componentes padrão do macOS: janela comum, barra lateral, `Form`, toolbar e alertas do sistema. Nada de gradientes, cartões coloridos ou fontes arredondadas.
-- Animações contínuas vão para o Core Animation (servidor de janelas), nunca para timers por quadro no app.
-- Nada de dependências novas sem motivo forte: o core é Rust com poucas crates; o app é Swift sem pacotes.
+1. Fork the repo and create a branch from `main`: `feat/…`, `fix/…`, `docs/…`, `chore/…`.
+2. Don't push to `main` directly; changes land through pull requests.
+3. Keep the change focused. Unrelated refactors make reviews slow.
+4. Add or update tests for behaviour you change.
+5. Run the same checks as CI before you push.
+6. Describe how to verify the change in the app and link the issue (`Closes #123`).
 
-## Rodando e testando
+### Code style
 
-```bash
-cd core && cargo test
-```
+- Match the style of the surrounding code.
+- Write interface text in Brazilian Portuguese, short and direct.
+- Screens use standard macOS components: regular windows, sidebars, `Form`, toolbars and system alerts. No gradients, colored cards or rounded fonts.
+- Continuous animation goes to Core Animation, never to per-frame timers in the app.
+- Keep dependencies to a minimum; discuss new ones in the issue first.
+- Never commit secrets, API keys or real user data. Test fixtures must be synthetic.
 
-```bash
-cd core && cargo build --release && bash tests/e2e.sh
-```
+### Project rules
 
-```bash
-cd app && swift build -c release
-```
+- Anything that spends the user's tokens asks for permission first.
+- Faísca doesn't read screen content or window titles, only app names and usage time.
+- Disk cleaning tests need their own `HOME`. Never run cleaning against a real home folder.
 
-```bash
-bash scripts/build.sh && open build/Oficina.app
-```
+### Commit messages
 
-O `e2e.sh` usa um `claude` falso e não gasta tokens. Testes de limpeza precisam de um `HOME` próprio: nunca rode limpeza contra a pasta real. O CI roda os três primeiros comandos em todo pull request.
+We use [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`. Write the subject in the imperative ("add", not "added").
 
-## Pull requests
+## Reporting security issues
 
-- Um assunto por PR, com a issue referenciada (`Resolve #123`).
-- Testes do core passando; em mudança de comportamento, um teste novo.
-- Descreva como verificar a mudança no app.
+Please don't open public issues for vulnerabilities. Use GitHub's [private vulnerability reporting](https://github.com/AlanEdward19/oficina/security/advisories/new).
+
+## License
+
+By contributing, you agree that your contributions are licensed under the [MIT License](LICENSE).
