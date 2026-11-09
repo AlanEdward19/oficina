@@ -187,6 +187,11 @@ impl Engine {
         }
     }
 
+    /// Espera a resposta em andamento terminar e esquece a conversa.
+    pub async fn reset_brain(&self) {
+        *self.brain.lock().await = None;
+    }
+
     /// Só tarefas à espera de aprovação podem ser liberadas.
     pub fn approve(self: &Arc<Self>, id: &str) -> Option<Task> {
         let t = self.store.get(id)?;

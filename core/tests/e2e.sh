@@ -51,6 +51,10 @@ check 'sem ferramentas' '--tools  --setting-sources' "$(tail -1 "$tmp/args.log")
 id=$(send '{"text":"erro"}'); check 'erro vira falha' failed "$(wait_for "$id" failed\ done)"
 check 'mostra o erro' 'Please run /login' "$(get "$id" error)"
 
+check 'nova conversa' 204 "$(api -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7901/v1/brain/reset)"
+id=$(send '{"text":"depois do reset"}'); wait_for "$id" done >/dev/null
+equal 'começa sem retomar' 0 "$(tail -1 "$tmp/args.log" | grep -c -- '--resume')"
+
 echo 'delegação'
 id=$(send '{"text":"delegar-nuvem"}'); check 'nuvem termina' done "$(wait_for "$id" done\ failed)"
 check 'link da sessão' session_fake123 "$(get "$id" url)"

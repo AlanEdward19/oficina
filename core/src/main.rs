@@ -120,6 +120,11 @@ async fn usage_refresh(State(app): State<App>) -> impl IntoResponse {
     Json(app.engine.usage(true))
 }
 
+async fn brain_reset(State(app): State<App>) -> StatusCode {
+    app.engine.reset_brain().await;
+    StatusCode::NO_CONTENT
+}
+
 async fn events(
     State(app): State<App>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -156,6 +161,7 @@ async fn main() {
         .route("/v1/tasks/{id}/approve", post(approve))
         .route("/v1/tasks/{id}/cancel", post(cancel))
         .route("/v1/events", get(events))
+        .route("/v1/brain/reset", post(brain_reset))
         .route("/v1/usage", get(usage))
         .route("/v1/usage/refresh", post(usage_refresh))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));

@@ -78,9 +78,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         t.status == "awaiting_approval" ? 0 : t.isActive ? 1 : 2
     }
 
+    private var clickMonitors: [Any] = []
+
+    private func hidePanel() {
+        panel.orderOut(nil)
+        clickMonitors.forEach(NSEvent.removeMonitor)
+        clickMonitors = []
+    }
+
+    /// Fecha a conversa quando o clique acontece fora dela. Os monitores só
+    /// existem enquanto a janela está aberta.
+    private func watchOutsideClicks() {
+        guard clickMonitors.isEmpty else { return }
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] _ in
+            MainActor.assumeIsolated { self?.hidePanel() }
+        }) {
+            clickMonitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            MainActor.assumeIsolated {
+                // A própria Faísca já alterna a conversa no clique.
+                if let self, event.window !== self.panel, event.window !== self.pet.window {
+                    self.hidePanel()
+                }
+            }
+            return event
+        }) {
+            clickMonitors.append(local)
+        }
+    }
+
     private func buildPanel() {
         panel = KeyPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 580),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: true
@@ -91,16 +122,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.level = .floating
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let host = NSHostingView(rootView: ChatView(core: core) { [weak self] in self?.panel.orderOut(nil) })
+        let host = NSHostingView(rootView: ChatView(core: core) { [weak self] in self?.hidePanel() })
         host.wantsLayer = true
-        host.layer?.cornerRadius = 14
+        host.layer?.cornerRadius = 16
         host.layer?.masksToBounds = true
         panel.contentView = host
+        // Trocar de app pelo teclado também fecha.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: panel, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.hidePanel() }
+        }
     }
 
     private func togglePanel() {
         if panel.isVisible {
-            panel.orderOut(nil)
+            hidePanel()
             return
         }
         let pf = pet.window.frame
@@ -112,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.setFrameOrigin(NSPoint(x: x, y: y))
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        watchOutsideClicks()
     }
 
     private func buildStatusItem() {

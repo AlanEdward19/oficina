@@ -202,6 +202,12 @@ final class Core: ObservableObject {
         }
     }
 
+    /// A próxima mensagem começa uma conversa nova no cérebro.
+    func resetBrain() {
+        let req = request("brain/reset", method: "POST")
+        Task { _ = try? await URLSession.shared.data(for: req) }
+    }
+
     func act(_ id: String, _ action: String) {
         let req = request("tasks/\(id)/\(action)", method: "POST")
         Task { _ = try? await URLSession.shared.data(for: req) }
