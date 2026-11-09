@@ -31,8 +31,8 @@ enum DockEdge: String {
 /// Aparência que vem dos ajustes de Mesa e Dock do macOS.
 struct DockLook: Equatable {
     var autohide = true
-    /// Atraso para aparecer (autohide-delay do macOS; padrão 0,5 s).
-    var revealDelay: Double = 0.5
+    /// Atraso para aparecer (autohide-delay do macOS, se definido; senão 0,1 s).
+    var revealDelay: Double = 0.1
     /// Multiplicador da velocidade da animação (autohide-time-modifier).
     var speed: Double = 1
     var tile: CGFloat = 48
@@ -275,7 +275,7 @@ enum SystemDock {
         look.edge = DockEdge(rawValue: value("orientation") as? String ?? "bottom") ?? .bottom
         // Enquanto a Oficina substitui a Dock, o atraso de verdade fica guardado.
         let delay = replacing ? saved?["delay"] as? Double : (value("autohide-delay") as? NSNumber)?.doubleValue
-        look.revealDelay = min(max(delay ?? 0.5, 0), 5)
+        look.revealDelay = min(max(delay ?? 0.1, 0), 5)
         let modifier = (value("autohide-time-modifier") as? NSNumber)?.doubleValue ?? 1
         look.speed = min(max(modifier, 0), 5)
         // Só para testes: mantém a Dock à vista.
@@ -697,6 +697,7 @@ final class DockController {
     private let pointer = DockPointer()
     private let panel: NSPanel
     private let host: TrackingHost<DockView>
+    private let container = NSView()
     private let edge: NSPanel
     private var shown = true
     /// Para onde a Dock vai. Tudo que a Faísca consulta usa o destino, não o
@@ -723,7 +724,12 @@ final class DockController {
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenNone]
         let relay = FrameRelay()
         host = TrackingHost(rootView: DockView(store: store, pointer: pointer, askName: askName, framesChanged: { relay.send($0) }))
-        panel.contentView = host
+        // O conteúdo fica dentro de um contêiner: quem desliza é o contêiner
+        // (sublayerTransform), que o AppKit não mexe.
+        container.wantsLayer = true
+        host.autoresizingMask = [.width, .height]
+        container.addSubview(host)
+        panel.contentView = container
 
         // Faixa quase invisível na borda que revela a Dock oculta.
         edge = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -848,49 +854,45 @@ final class DockController {
         self.target = target
         slideToken += 1
         let token = slideToken
-        let layer = host.layer
-        // Se outra animação estava no meio, continua de onde está.
-        let current = (layer?.presentation()?.value(forKeyPath: "transform.translation") as? NSValue)?.sizeValue
-        layer?.removeAnimation(forKey: "slide")
 
-        let wasAway = panel.frame.origin != shownFrame.origin && current == nil
-        if animated && (shown || !wasAway) {
-            // A janela fica parada na posição visível e o conteúdo desliza
-            // por Core Animation, no servidor de janelas.
-            let away = CGSize(width: hiddenFrame.minX - shownFrame.minX, height: hiddenFrame.minY - shownFrame.minY)
-            let from = current ?? (shown ? away : .zero)
-            // Antes de a janela ir para o lugar, o conteúdo já fica na posição de
-            // saída; senão a Dock pisca inteira por um quadro e dá um tranco.
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            layer?.transform = CATransform3DMakeTranslation(from.width, from.height, 0)
-            CATransaction.commit()
-            CATransaction.flush()
-            panel.setFrame(shownFrame, display: true)
-            let anim = CABasicAnimation(keyPath: "transform.translation")
-            anim.fromValue = NSValue(size: from)
-            anim.toValue = NSValue(size: shown ? .zero : away)
-            anim.duration = (shown ? 0.3 : 0.24) * max(store.look.speed, 0.05)
+        // A janela nunca sai do lugar (mover uma janela para dentro da tela
+        // custa quadros e dá tranco). Escondida, o conteúdo fica deslocado
+        // para fora e a janela deixa os cliques passarem.
+        panel.setFrame(shownFrame, display: true)
+        container.frame = NSRect(origin: .zero, size: shownFrame.size)
+        guard let layer = container.layer else { return }
+        let away = CATransform3DMakeTranslation(hiddenFrame.minX - shownFrame.minX, hiddenFrame.minY - shownFrame.minY, 0)
+        let goal = shown ? CATransform3DIdentity : away
+        let current = layer.presentation()?.sublayerTransform ?? layer.sublayerTransform
+        layer.removeAnimation(forKey: "slide")
+        if shown { panel.ignoresMouseEvents = false }
+
+        var duration = 0.0
+        var curve: CAMediaTimingFunction?
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.sublayerTransform = goal
+        if animated && !CATransform3DEqualToTransform(current, goal) {
+            let anim = CABasicAnimation(keyPath: "sublayerTransform")
+            anim.fromValue = NSValue(caTransform3D: current)
+            anim.toValue = NSValue(caTransform3D: goal)
+            anim.duration = (shown ? 0.28 : 0.22) * max(store.look.speed, 0.05)
             anim.timingFunction = shown ? showCurve : hideCurve
-            anim.fillMode = .forwards
-            anim.isRemovedOnCompletion = false
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            layer?.transform = CATransform3DIdentity
+            duration = anim.duration
+            curve = anim.timingFunction
             CATransaction.setCompletionBlock { [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self, self.slideToken == token else { return }
-                    if !self.shown { self.panel.setFrame(hiddenFrame, display: false) }
-                    self.host.layer?.removeAnimation(forKey: "slide")
+                    guard let self, self.slideToken == token, !self.shown else { return }
+                    self.panel.ignoresMouseEvents = true
                 }
             }
-            layer?.add(anim, forKey: "slide")
-            CATransaction.commit()
-            onLayout(target, anim.duration, anim.timingFunction)
-        } else {
-            panel.setFrame(target, display: true)
-            onLayout(target, 0, nil)
+            layer.add(anim, forKey: "slide")
+        } else if !shown {
+            panel.ignoresMouseEvents = true
         }
+        CATransaction.commit()
+        onLayout(target, duration, curve)
+
         if store.look.autohide && !shown {
             let strip: NSRect
             switch store.look.edge {
@@ -910,7 +912,6 @@ final class DockController {
         }
     }
 
-    /// Área que conta como "na Dock": a barra mais a fresta até a borda.
     /// Como na Dock do macOS: vale a barra (mais a fresta até a borda). O
     /// espaço acima só conta com ampliação ligada, onde os ícones crescem.
     private var hotZone: NSRect {
