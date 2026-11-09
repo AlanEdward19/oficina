@@ -14,12 +14,10 @@ private func color(_ hex: String) -> CGColor {
 
 /// A Faísca: uma gota de solda com antena. Tudo é animado pelo Core Animation,
 /// que roda no servidor de renderização; o app fica parado entre mudanças.
-final class PetView: NSView {
-    var onClick: (() -> Void)?
-    var onMenu: ((NSEvent) -> Void)?
-    var onDragStart: (() -> Void)?
-    var onDrop: (() -> Void)?
-    var onPetted: (() -> Void)?
+@MainActor
+final class PetFigure {
+    /// Camada raiz, solta: quem a move é o Core Animation, fora do app.
+    let root = CALayer()
 
     private let body = CAShapeLayer()
     private let leftEye = CALayer()
@@ -30,32 +28,28 @@ final class PetView: NSView {
     private let outfitLayer = CALayer()
     private let propLayer = CALayer()
     private var bodyColor = NSColor(calibratedRed: 1, green: 0.62, blue: 0.16, alpha: 1).cgColor
-    private var dragOffset: NSPoint?
-    private var dragged = false
     private(set) var mood: Mood = .idle
     private var blinkTimer: Timer?
-    private var strokes: [(x: CGFloat, at: Date)] = []
-    private var lastStrokeDir: CGFloat = 0
-    private var lastPetted = Date.distantPast
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        layer = CALayer()
+    init(size: NSSize) {
+        root.anchorPoint = .zero
+        root.bounds = CGRect(origin: .zero, size: size)
+        root.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
         build()
         apply(.idle)
     }
 
-    required init?(coder: NSCoder) { fatalError() }
+    private var w: CGFloat { root.bounds.width }
+    private var bounds: CGRect { root.bounds }
 
-    override var isFlipped: Bool { false }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    private var w: CGFloat { bounds.width }
+    /// Camadas fora de uma view não herdam a escala da tela: sem isso, borram.
+    private func crispen(_ layer: CALayer? = nil) {
+        let l = layer ?? root
+        l.contentsScale = root.contentsScale
+        l.sublayers?.forEach { crispen($0) }
+    }
 
     private func build() {
-        guard let root = layer else { return }
-        root.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
 
         let path = CGMutablePath()
         // Gota arredondada, mais larga na base.
@@ -117,6 +111,7 @@ final class PetView: NSView {
         badge.contentsScale = root.contentsScale
         badge.isHidden = true
         root.addSublayer(badge)
+        crispen()
     }
 
     // MARK: Humor
@@ -288,7 +283,7 @@ final class PetView: NSView {
     }
 
     /// Olhos fechados de felicidade por um instante.
-    private func blissEyes() {
+    func bliss() {
         for eye in [leftEye, rightEye] {
             let a = CAKeyframeAnimation(keyPath: "transform.scale.y")
             a.values = [1, 0.2, 0.2, 1]
@@ -430,7 +425,7 @@ final class PetView: NSView {
             l.font = NSFont.boldSystemFont(ofSize: 7)
             l.foregroundColor = NSColor.white.cgColor
             l.alignmentMode = .center
-            l.contentsScale = layer?.contentsScale ?? 2
+            l.contentsScale = root.contentsScale
             outfitLayer.addSublayer(l)
         }
 
@@ -451,10 +446,28 @@ final class PetView: NSView {
                         CGPoint(x: w - 18, y: 1), CGPoint(x: w - 13, y: 10)]), fill: "#7CF2C4", stroke: "#FFFFFF", width: 1, into: propLayer)
         default: break
         }
+        crispen(outfitLayer)
+        crispen(propLayer)
         apply(mood)
     }
+}
 
-    // MARK: Gestos
+/// Área de toque invisível do tamanho da Faísca: clique, arraste e carinho.
+final class PetHitView: NSView {
+    var onClick: (() -> Void)?
+    var onMenu: ((NSEvent) -> Void)?
+    var onDragStart: (() -> Void)?
+    var onDrag: ((NSPoint) -> Void)?
+    var onDrop: (() -> Void)?
+    var onPetted: (() -> Void)?
+
+    private var dragOffset: NSPoint?
+    private var dragged = false
+    private var strokes: [(x: CGFloat, at: Date)] = []
+    private var lastStrokeDir: CGFloat = 0
+    private var lastPetted = Date.distantPast
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -484,7 +497,6 @@ final class PetView: NSView {
         if strokes.count >= 5, now.timeIntervalSince(lastPetted) > 2.5 {
             lastPetted = now
             strokes.removeAll()
-            blissEyes()
             onPetted?()
         }
     }
@@ -505,7 +517,9 @@ final class PetView: NSView {
         if !dragged { onDragStart?() }
         dragged = true
         let m = NSEvent.mouseLocation
-        window.setFrameOrigin(NSPoint(x: m.x - off.x, y: m.y - off.y))
+        let origin = NSPoint(x: m.x - off.x, y: m.y - off.y)
+        window.setFrameOrigin(origin)
+        onDrag?(origin)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -518,15 +532,26 @@ final class PetView: NSView {
     }
 }
 
-/// Janela do pet: a casa na Dock, as saídas pela tela, gravidade e passeios.
+/// A Faísca na tela: a casa na Dock, as saídas, gravidade e passeios.
 /// Existe uma Faísca só: ou está sentada na Dock, ou está andando pela tela.
+///
+/// O desenho fica num palco transparente que cobre a tela e ignora o mouse;
+/// os movimentos são animações do Core Animation, executadas pelo servidor
+/// de janelas, então andar não custa CPU do app. Uma janelinha invisível do
+/// tamanho dela recebe clique, arraste e carinho, e só muda de lugar quando
+/// um movimento termina.
 @MainActor
 final class PetController {
+    /// Janela de toque (invisível). Serve de âncora para balão e conversa.
     let window: NSPanel
-    let view: PetView
+    let view: PetHitView
+    let figure: PetFigure
+    private let stage: NSPanel
+    private let size = NSSize(width: 84, height: 88)
+
     /// Topo da Dock (embaixo) e sua faixa horizontal, se estiver à vista.
     var shelf: () -> (y: CGFloat, x: ClosedRange<CGFloat>)? = { nil }
-    /// Onde a janela fica quando ela está em casa (pode estar fora da tela).
+    /// Onde ela fica quando está em casa (pode estar fora da tela).
     var homeFrame: () -> NSRect? = { nil }
     var dockVisible: () -> Bool = { false }
     var dockFrame: () -> NSRect? = { nil }
@@ -534,8 +559,12 @@ final class PetController {
     var randomIcon: () -> String? = { nil }
     var nudge: (String) -> Void = { _ in }
     var onEvent: (String) -> Void = { _ in }
+    /// Enquanto houver uma pergunta no balão, ela não sai andando.
+    var busy: () -> Bool = { false }
 
     private(set) var home = false
+    private var origin = NSPoint.zero
+    private var token = 0
     private var walkTimer: Timer?
     private var celebrateUntil = Date.distantPast
     private var taskMood: Mood?
@@ -545,39 +574,120 @@ final class PetController {
     private let foot: CGFloat = 5
 
     init() {
-        let size = NSSize(width: 84, height: 88)
-        window = NSPanel(
-            contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
+        let screen = (NSScreen.screens.first ?? NSScreen.main)?.frame ?? .zero
+
+        stage = NSPanel(contentRect: screen, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        stage.isOpaque = false
+        stage.backgroundColor = .clear
+        stage.hasShadow = false
+        stage.ignoresMouseEvents = true
+        stage.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+        stage.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        // View que hospeda camadas: o AppKit não mexe nas subcamadas.
+        let host = NSView(frame: NSRect(origin: .zero, size: screen.size))
+        host.layer = CALayer()
+        host.wantsLayer = true
+        stage.contentView = host
+        stage.setFrame(screen, display: false)
+
+        figure = PetFigure(size: size)
+        host.layer?.addSublayer(figure.root)
+
+        window = NSPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.isOpaque = false
-        window.backgroundColor = .clear
+        // Quase transparente: o bastante para receber o mouse.
+        window.backgroundColor = NSColor(white: 1, alpha: 0.004)
         window.hasShadow = false
-        // Acima da Dock, para poder sentar e andar nela.
-        window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
-        view = PetView(frame: NSRect(origin: .zero, size: size))
+        view = PetHitView(frame: NSRect(origin: .zero, size: size))
         window.contentView = view
-        if let screen = NSScreen.main?.visibleFrame {
-            window.setFrameOrigin(NSPoint(x: screen.maxX - 220, y: screen.minY))
-        }
-        window.orderFrontRegardless()
+
+        stage.orderFrontRegardless()
+        place(NSPoint(x: screen.maxX - 220, y: screen.minY), duration: 0)
+
         view.onDragStart = { [weak self] in
             guard let self else { return }
-            self.moving = false
+            self.interrupt()
             self.home = false
-            self.view.walking(false)
-            self.view.crawling(false)
             self.onEvent("pet_drag")
         }
+        view.onDrag = { [weak self] p in self?.follow(p) }
         view.onDrop = { [weak self] in self?.dropped() }
         view.onPetted = { [weak self] in
+            self?.figure.bliss()
             self?.celebrate(.happy, seconds: 1.6)
             self?.onEvent("pet_petted")
         }
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.resizeStage() }
+        }
         scheduleWalk()
+    }
+
+    var frame: NSRect { NSRect(origin: origin, size: size) }
+    var mood: Mood { figure.mood }
+
+    private var screen: NSRect { stage.frame }
+
+    private func resizeStage() {
+        let s = (NSScreen.screens.first ?? NSScreen.main)?.frame ?? .zero
+        stage.setFrame(s, display: false)
+        stage.contentView?.frame = NSRect(origin: .zero, size: s.size)
+        place(origin, duration: 0)
+    }
+
+    // MARK: Movimento
+
+    /// Leva o desenho até `p` (canto inferior esquerdo, em coordenadas da
+    /// tela). A janela de toque some durante o trajeto e aparece no destino.
+    private func place(_ p: NSPoint, duration: Double, timing: CAMediaTimingFunctionName = .easeOut, done: (() -> Void)? = nil) {
+        origin = p
+        let local = CGPoint(x: p.x - stage.frame.minX, y: p.y - stage.frame.minY)
+        let mine = token
+        CATransaction.begin()
+        if duration > 0 {
+            CATransaction.setAnimationDuration(duration)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: timing))
+            window.orderOut(nil)
+        } else {
+            CATransaction.setDisableActions(true)
+        }
+        CATransaction.setCompletionBlock { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.token == mine else { return }
+                self.window.setFrameOrigin(p)
+                self.window.orderFrontRegardless()
+                done?()
+            }
+        }
+        figure.root.position = local
+        CATransaction.commit()
+    }
+
+    /// Para tudo onde está (para o arraste começar do ponto visível).
+    private func interrupt() {
+        token += 1
+        moving = false
+        figure.walking(false)
+        figure.crawling(false)
+        if let shown = figure.root.presentation()?.position {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            figure.root.removeAllAnimations()
+            figure.root.position = shown
+            CATransaction.commit()
+            origin = NSPoint(x: shown.x + stage.frame.minX, y: shown.y + stage.frame.minY)
+        }
+    }
+
+    /// Durante o arraste o desenho acompanha o dedo, sem animação.
+    private func follow(_ p: NSPoint) {
+        origin = p
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        figure.root.position = CGPoint(x: p.x - stage.frame.minX, y: p.y - stage.frame.minY)
+        CATransaction.commit()
     }
 
     // MARK: Humor
@@ -629,11 +739,11 @@ final class PetController {
     }
 
     private func set(_ mood: Mood) {
-        if view.mood != mood { view.apply(mood) }
+        if figure.mood != mood { figure.apply(mood) }
     }
 
     func wear(_ outfit: OutfitData?) {
-        view.wear(outfit)
+        figure.wear(outfit)
     }
 
     // MARK: Casa na Dock
@@ -645,7 +755,7 @@ final class PetController {
     func dockMoved(home target: NSRect?, animated: Bool) {
         guard !moving, NSEvent.pressedMouseButtons == 0 else { return }
         if home, let target {
-            move(to: target, duration: animated ? 0.22 : 0)
+            place(target.origin, duration: animated ? 0.22 : 0)
         } else if home {
             // Sem casa (Dock desligada ou de lado): ela fica na tela.
             home = false
@@ -662,7 +772,7 @@ final class PetController {
             return
         }
         home = true
-        window.setFrame(target, display: false)
+        place(target.origin, duration: 0)
     }
 
     /// Sai de casa: pula da Dock ou, recolhida, rasteja de baixo da borda.
@@ -675,23 +785,17 @@ final class PetController {
         outUntil = Date().addingTimeInterval(.random(in: 90...240))
         moving = true
         if dockVisible() {
-            var up = start
-            up.origin.y = floorY(start.midX)
-            view.look(-1)
-            animate(to: up, duration: 0.28, timing: .easeOut) { [weak self] in
+            figure.look(-1)
+            place(NSPoint(x: start.minX, y: floorY(start.midX)), duration: 0.28) { [weak self] in
                 self?.moving = false
                 done?()
             }
         } else {
             // Começa logo abaixo da borda, onde a Dock estaria, e sobe.
-            var below = start
-            below.origin.y = screen.minY - start.height + 4
-            window.setFrame(below, display: false)
-            var up = below
-            up.origin.y = screen.minY
-            view.crawling(true)
-            animate(to: up, duration: 1.1, timing: .easeOut) { [weak self] in
-                self?.view.crawling(false)
+            place(NSPoint(x: start.minX, y: screen.minY - size.height + 4), duration: 0)
+            figure.crawling(true)
+            place(NSPoint(x: start.minX, y: screen.minY), duration: 1.1) { [weak self] in
+                self?.figure.crawling(false)
                 self?.moving = false
                 done?()
             }
@@ -705,17 +809,15 @@ final class PetController {
             guard let self, let target = self.homeFrame() else { return }
             self.moving = true
             if self.dockVisible() {
-                self.animate(to: target, duration: 0.25, timing: .easeIn) {
+                self.place(target.origin, duration: 0.25, timing: .easeIn) {
                     self.moving = false
                     self.home = true
                 }
             } else {
-                var below = self.window.frame
-                below.origin.y = self.screen.minY - below.height + 4
-                self.view.crawling(true)
-                self.animate(to: below, duration: 0.9, timing: .easeIn) {
-                    self.view.crawling(false)
-                    self.window.setFrame(target, display: false)
+                self.figure.crawling(true)
+                self.place(NSPoint(x: self.origin.x, y: self.screen.minY - self.size.height + 4), duration: 0.9, timing: .easeIn) {
+                    self.figure.crawling(false)
+                    self.place(target.origin, duration: 0)
                     self.moving = false
                     self.home = true
                 }
@@ -725,10 +827,10 @@ final class PetController {
 
     /// Solta em cima da Dock: entra em casa. Fora dela: cai até o chão.
     private func dropped() {
-        if let dock = dockFrame(), dockVisible(), dock.contains(NSPoint(x: window.frame.midX, y: window.frame.minY + 20)),
+        if let dock = dockFrame(), dockVisible(), dock.contains(NSPoint(x: frame.midX, y: frame.minY + 20)),
            let target = homeFrame() {
             moving = true
-            animate(to: target, duration: 0.3, timing: .easeInEaseOut) { [weak self] in
+            place(target.origin, duration: 0.3, timing: .easeInEaseOut) { [weak self] in
                 self?.moving = false
                 self?.home = true
             }
@@ -739,9 +841,7 @@ final class PetController {
         settle(animated: true)
     }
 
-    // MARK: Chão e movimento
-
-    private var screen: NSRect { (window.screen ?? NSScreen.main)?.frame ?? .zero }
+    // MARK: Chão e caminhada
 
     /// Onde ela fica de pé num dado x: em cima da Dock ou na base da tela.
     private func floorY(_ centerX: CGFloat) -> CGFloat {
@@ -750,55 +850,32 @@ final class PetController {
     }
 
     private func clampX(_ centerX: CGFloat) -> CGFloat {
-        min(max(centerX, screen.minX + window.frame.width / 2), screen.maxX - window.frame.width / 2)
-    }
-
-    private func move(to frame: NSRect, duration: Double) {
-        if duration <= 0 {
-            window.setFrame(frame, display: false)
-        } else {
-            animate(to: frame, duration: duration, timing: .easeOut, done: nil)
-        }
-    }
-
-    private func animate(to frame: NSRect, duration: Double, timing: CAMediaTimingFunctionName, done: (() -> Void)?) {
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = duration
-            ctx.timingFunction = CAMediaTimingFunction(name: timing)
-            window.animator().setFrame(frame, display: false)
-        }, completionHandler: {
-            MainActor.assumeIsolated { done?() }
-        })
+        min(max(centerX, screen.minX + size.width / 2), screen.maxX - size.width / 2)
     }
 
     /// Cai (ou sobe) até o chão onde está.
     func settle(animated: Bool) {
         guard !home, !moving, NSEvent.pressedMouseButtons == 0 else { return }
-        var f = window.frame
-        let y = floorY(f.midX)
-        guard abs(f.minY - y) > 0.5 else { return }
-        let fall = f.minY - y
-        f.origin.y = y
-        if animated {
-            animate(to: f, duration: min(0.5, max(0.15, Double(abs(fall)) / 1400)), timing: fall > 0 ? .easeIn : .easeOut, done: nil)
-        } else {
-            window.setFrame(f, display: false)
-        }
+        let y = floorY(frame.midX)
+        guard abs(origin.y - y) > 0.5 else { return }
+        let fall = origin.y - y
+        let duration = animated ? min(0.5, max(0.15, Double(abs(fall)) / 1400)) : 0
+        place(NSPoint(x: origin.x, y: y), duration: duration, timing: fall > 0 ? .easeIn : .easeOut)
     }
 
     /// Anda até um x, pulando para cima ou para baixo da Dock no caminho.
     func go(to centerX: CGFloat, speed: CGFloat = 90, then done: (() -> Void)? = nil) {
         guard !home, NSEvent.pressedMouseButtons == 0 else { return }
         let target = clampX(centerX)
-        let start = window.frame.midX
+        let start = frame.midX
         guard abs(target - start) > 2 else {
             done?()
             return
         }
         let dir: CGFloat = target > start ? 1 : -1
-        view.look(dir)
+        figure.look(dir)
         moving = true
-        view.walking(true)
+        figure.walking(true)
         var stops: [CGFloat] = []
         if let s = shelf() {
             for edge in [s.x.lowerBound, s.x.upperBound] where (edge - start) * dir > 0 && (target - edge) * dir > 0 {
@@ -809,8 +886,8 @@ final class PetController {
         stops.append(target)
         step(stops, dir: dir, speed: speed) { [weak self] in
             self?.moving = false
-            self?.view.walking(false)
-            self?.view.look(0)
+            self?.figure.walking(false)
+            self?.figure.look(0)
             done?()
         }
     }
@@ -820,19 +897,14 @@ final class PetController {
             done()
             return
         }
-        var f = window.frame
-        let distance = abs(next - f.midX)
-        f.origin.x = next - f.width / 2
+        let distance = abs(next - frame.midX)
         // Na beirada da Dock, o chão do outro lado decide: sobe ou desce num pulo.
         let landing = floorY(next + dir * 2)
-        let hop = abs(landing - f.minY) > 1
-        animate(to: f, duration: Double(distance / speed), timing: .linear) { [weak self] in
+        let hop = abs(landing - origin.y) > 1
+        place(NSPoint(x: next - size.width / 2, y: origin.y), duration: Double(distance / speed), timing: .linear) { [weak self] in
             guard let self, self.moving else { return }
             if hop {
-                var g = self.window.frame
-                g.origin.x += dir * 6
-                g.origin.y = landing
-                self.animate(to: g, duration: 0.2, timing: .easeOut) {
+                self.place(NSPoint(x: self.origin.x + dir * 6, y: landing), duration: 0.2) {
                     self.step(Array(stops.dropFirst()), dir: dir, speed: speed, done: done)
                 }
             } else {
@@ -845,7 +917,7 @@ final class PetController {
 
     /// Alguém abriu um app pela Dock: ela sai, corre até o ícone e volta.
     func appOpened(_ id: String) {
-        guard view.mood != .sleeping, dockVisible(), iconX(id) != nil else { return }
+        guard figure.mood != .sleeping, dockVisible(), iconX(id) != nil, !busy() else { return }
         let visit = { [weak self] in
             guard let self, let x = self.iconX(id) else { return }
             self.go(to: x, speed: 320) {
@@ -859,13 +931,12 @@ final class PetController {
 
     /// Troca de ambiente: um giro de alegria, onde estiver.
     func environmentChanged() {
-        view.spin()
+        figure.spin()
         celebrate(.happy, seconds: 1)
     }
 
     private func scheduleWalk() {
-        // Andar custa CPU (a janela é animada quadro a quadro): passeios espaçados.
-        let t = Timer(timeInterval: .random(in: 45...120), repeats: false) { [weak self] _ in
+        let t = Timer(timeInterval: .random(in: 25...70), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.wander()
                 self?.scheduleWalk()
@@ -879,8 +950,8 @@ final class PetController {
     /// Em casa, às vezes sai para passear. Fora, passeia e, depois de um
     /// tempo, volta. Curiosa ou entediada, vai mexer num ícone da Dock.
     private func wander() {
-        guard !moving, [.idle, .curious, .bored, .lonely].contains(view.mood), NSEvent.pressedMouseButtons == 0 else { return }
-        let restless = view.mood == .curious || view.mood == .bored || view.mood == .lonely
+        guard !moving, !busy(), [.idle, .curious, .bored, .lonely].contains(figure.mood), NSEvent.pressedMouseButtons == 0 else { return }
+        let restless = figure.mood == .curious || figure.mood == .bored || figure.mood == .lonely
         if home {
             guard restless || Double.random(in: 0...1) < 0.35 else { return }
             comeOut { [weak self] in self?.stroll(restless: restless) }
@@ -902,6 +973,6 @@ final class PetController {
             return
         }
         let dx = CGFloat.random(in: 80...260) * (Bool.random() ? 1 : -1)
-        go(to: window.frame.midX + dx)
+        go(to: frame.midX + dx)
     }
 }

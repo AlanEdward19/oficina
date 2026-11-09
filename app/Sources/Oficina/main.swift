@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pet.onEvent = { [weak self] kind in self?.core.mindEvents([["kind": kind]]) }
         bubble = BubbleController(anchor: pet.window)
         bubble.model.answer = { [weak self] initiative, accepted in self?.answer(initiative, accepted) }
+        pet.busy = { [weak self] in self?.bubble.model.initiative != nil }
         pet.view.onMenu = { [weak self] event in self?.showMenu(event) }
         let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Oficina")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
@@ -301,8 +302,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hidePanel()
             return
         }
-        let pf = pet.window.frame
-        let screen = pet.window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? pf
+        let pf = pet.frame
+        let screen = NSScreen.screens.first?.visibleFrame ?? NSScreen.main?.visibleFrame ?? pf
         var x = pf.midX - panel.frame.width / 2
         x = min(max(x, screen.minX + 8), screen.maxX - panel.frame.width - 8)
         var y = pf.maxY + 8

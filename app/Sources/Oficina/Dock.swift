@@ -250,7 +250,8 @@ enum SystemDock {
     }
 
     private static var replaceKey: String { testing == nil ? "dockReplace" : "dockReplaceTest" }
-    static var replacing: Bool { UserDefaults.standard.bool(forKey: replaceKey) }
+    /// Ligada por padrão: a Dock da Oficina substitui a do macOS.
+    static var replacing: Bool { UserDefaults.standard.object(forKey: replaceKey) as? Bool ?? true }
 
     /// Ajustes atuais. Enquanto a Oficina substitui a Dock, o "ocultar" que
     /// vale é o que o usuário tinha antes (ou mudou depois).

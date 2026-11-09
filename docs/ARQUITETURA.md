@@ -67,15 +67,18 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
 ## Dock
 
 - Segue Mesa e Dock do macOS: ocultar automaticamente, tamanho, ampliação e posição.
-- "Substituir a Dock do macOS" guarda os valores originais, liga ocultar com atraso de 1000 s na Dock do
+- "Substituir a Dock do macOS" vem ligado. Guarda os valores originais, liga ocultar com atraso de 1000 s na Dock do
   sistema e reinicia a Dock. Ao sair da Oficina, devolve tudo com a sua escolha mais recente. Se a Oficina
   fechar à força com a substituição ligada:
   `defaults delete com.apple.dock autohide-delay && killall Dock`
 
 ## Limites conhecidos
 
-- **CPU do app:** parado fica perto de 0%, mas cada passeio da Faísca anima a janela quadro a quadro.
-  O próximo passo é animar por Core Animation dentro de uma janela maior.
+- **CPU do app:** parado, cerca de 0,5%. A Faísca vive num palco transparente da tela inteira que ignora o
+  mouse; os movimentos são animações do Core Animation, executadas pelo servidor de janelas. Numa visita
+  à Dock o app caiu de cerca de 12% para cerca de 3% de CPU (o resto é o ícone balançando, em SwiftUI).
+  Uma janela invisível do tamanho dela recebe clique, arraste e carinho e só muda de lugar no fim de
+  cada movimento, então durante uma caminhada ela não responde a clique.
 
 - **Nuvem:** o `--cloud` exige terminal, então o core o executa num pseudo-terminal (`script`) e guarda o link.
   É frágil a mudanças no CLI. Não há API de status: "concluída" quer dizer sessão aberta, e o acompanhamento é
