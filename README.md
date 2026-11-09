@@ -37,6 +37,10 @@ open build/Oficina.app
 
 Clique na Faísca para conversar. Para sair, botão direito nela e **Sair da Oficina**.
 
+A Dock da Oficina fica na base da tela, com ambientes (Trabalho, Pessoal…). ⌃⌥1 a ⌃⌥9 trocam de ambiente
+e escondem os apps que são só do anterior. Clique direito num ícone fixa, remove ou move o app; clique
+direito nos ambientes cria, renomeia ou apaga. Os ambientes ficam em `dock.json`.
+
 ## Desenvolvimento
 
 ```bash

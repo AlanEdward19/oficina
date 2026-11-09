@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let core = Core()
     private var pet: PetController!
     private var notch: NotchController!
+    private var dock: DockController!
     private var usageTimer: Timer?
     private var panel: KeyPanel!
     private var status: NSStatusItem!
@@ -19,6 +20,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pet = PetController()
         pet.view.onClick = { [weak self] in self?.togglePanel() }
         pet.view.onMenu = { [weak self] event in self?.showMenu(event) }
+        let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Oficina")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let dockStore = DockStore(home: home)
+        dockStore.openChat = { [weak self] in self?.openChat() }
+        dock = DockController(store: dockStore) { [weak self] title, initial, done in self?.askName(title, initial, done) }
+        pet.keepOut = { [weak self] in self?.dock.occupiedX }
         notch = NotchController()
         notch.model.act = { [weak self] id, action in self?.core.act(id, action) }
         notch.model.openChat = { [weak self] in
@@ -37,7 +44,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &bag)
         core.$usage
             .receive(on: RunLoop.main)
-            .sink { [weak self] usage in MainActor.assumeIsolated { self?.notch.model.usage = usage } }
+            .sink { [weak self] usage in
+                MainActor.assumeIsolated {
+                    self?.notch.model.usage = usage
+                    self?.dock.store.usage = usage
+                }
+            }
             .store(in: &bag)
         // Mantém o percentual do notch vivo sem acordar o Mac à toa.
         let timer = Timer(timeInterval: 600, repeats: true) { [weak self] _ in
@@ -164,6 +176,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         chat.keyEquivalentModifierMask = [.control, .option]
         chat.target = self
         menu.addItem(chat)
+        let dockItem = NSMenuItem(title: "Dock", action: nil, keyEquivalent: "")
+        let dockMenu = NSMenu()
+        let showDock = NSMenuItem(title: "Mostrar Dock", action: #selector(toggleDock), keyEquivalent: "")
+        showDock.target = self
+        showDock.state = dock.enabled ? .on : .off
+        dockMenu.addItem(showDock)
+        dockMenu.addItem(.separator())
+        for (i, env) in dock.store.envs.enumerated() {
+            let item = NSMenuItem(title: env.name, action: #selector(pickEnvironment(_:)), keyEquivalent: i < 9 ? "\(i + 1)" : "")
+            item.keyEquivalentModifierMask = [.control, .option]
+            item.target = self
+            item.tag = i
+            item.state = i == dock.store.active ? .on : .off
+            dockMenu.addItem(item)
+        }
+        dockItem.submenu = dockMenu
+        menu.addItem(dockItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Sair da Oficina", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
@@ -174,6 +203,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSMenu.popUpContextMenu(makeMenu(), with: event, for: pet.view)
     }
 
+    @objc private func toggleDock() { dock.enabled.toggle() }
+    @objc private func pickEnvironment(_ sender: NSMenuItem) { dock.store.switchTo(sender.tag) }
+
+    func askName(_ title: String, _ initial: String, _ done: @escaping (String) -> Void) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancelar")
+        let field = NSTextField(string: initial)
+        field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
+        field.placeholderString = "Nome do ambiente"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { done(String(name.prefix(24))) }
+    }
+
     @objc private func openChat() {
         if !panel.isVisible { togglePanel() }
     }
@@ -182,20 +230,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func registerHotKey() {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let me = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, data -> OSStatus in
-            guard let data else { return noErr }
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, data -> OSStatus in
+            guard let data, let event else { return noErr }
+            var key = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                              nil, MemoryLayout<EventHotKeyID>.size, nil, &key)
             let d = Unmanaged<AppDelegate>.fromOpaque(data).takeUnretainedValue()
-            DispatchQueue.main.async { MainActor.assumeIsolated { d.togglePanel() } }
+            let id = Int(key.id)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if id == 1 { d.togglePanel() } else if id >= 11 { d.dock.store.switchTo(id - 11) }
+                }
+            }
             return noErr
         }, 1, &spec, me, nil)
-        RegisterEventHotKey(
-            UInt32(kVK_Space),
-            UInt32(controlKey | optionKey),
-            EventHotKeyID(signature: OSType(0x4F46_4943), id: 1),
-            GetApplicationEventTarget(),
-            0,
-            &hotKey
-        )
+        let signature = OSType(0x4F46_4943)
+        RegisterEventHotKey(UInt32(kVK_Space), UInt32(controlKey | optionKey),
+                            EventHotKeyID(signature: signature, id: 1), GetApplicationEventTarget(), 0, &hotKey)
+        // ⌃⌥1…9 trocam de ambiente da Dock.
+        let digits = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
+        for (i, code) in digits.enumerated() {
+            var ref: EventHotKeyRef?
+            RegisterEventHotKey(UInt32(code), UInt32(controlKey | optionKey),
+                                EventHotKeyID(signature: signature, id: UInt32(11 + i)), GetApplicationEventTarget(), 0, &ref)
+        }
     }
 }
 

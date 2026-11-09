@@ -311,6 +311,11 @@ final class PetController {
         let dx = CGFloat.random(in: 50...180) * (Bool.random() ? 1 : -1)
         var target = window.frame
         target.origin.x = min(max(target.minX + dx, screen.minX), screen.maxX - target.width)
+        // Não passeia por cima da Dock: para na beirada do lado em que está.
+        if let r = keepOut?(), target.maxX > r.lowerBound, target.minX < r.upperBound {
+            target.origin.x = window.frame.midX < (r.lowerBound + r.upperBound) / 2 ? r.lowerBound - target.width : r.upperBound
+            target.origin.x = min(max(target.minX, screen.minX), screen.maxX - target.width)
+        }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = Double(abs(dx)) / 70
             window.animator().setFrame(target, display: false)
@@ -318,4 +323,7 @@ final class PetController {
     }
 
     private var isDragging: Bool { NSEvent.pressedMouseButtons != 0 }
+
+    /// Faixa horizontal da tela que o pet evita ao passear.
+    var keepOut: (() -> ClosedRange<CGFloat>?)?
 }

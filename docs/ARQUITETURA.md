@@ -18,7 +18,7 @@ Memória em *physical footprint*, a métrica do Monitor de Atividade, com pet e 
 | | Disco | Memória | CPU parado |
 |---|---|---|---|
 | `oficinad` | 1,2 MB | 16 MB depois de ler o uso (1,4 MB antes) | 0% |
-| `Oficina.app` | 400 KB + core | 24 MB | 0% |
+| `Oficina.app` (pet, notch e Dock) | 600 KB + core | 27 MB | 0,1% |
 | Vorssaint, para comparar | | 143 MB | não medido |
 
 A comparação ainda não é entre iguais: o Vorssaint faz muito mais coisas. O custo real aparece com o
@@ -65,7 +65,7 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 ## Caminho
 
 1. **Fundação** (feito): core, roteamento, pet, chat, aprovação.
-2. **Desktop:** dock por ambientes, wallpaper Metal com pausa quando coberto, início automático.
+2. **Desktop:** Dock por ambientes (feita, convive com a Dock do macOS), início automático.
 3. **Substituir o Vorssaint** (notch e uso do Claude já feitos), por ordem de uso: música e agenda no notch, área de transferência,
    alternador de janelas, layout de janelas, mixer de áudio, captura de tela, limpeza.
 4. **Pet com vida:** emoções e aprendizado no core, inspirados nas ideias do Pestinha.
