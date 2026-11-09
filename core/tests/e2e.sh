@@ -4,7 +4,8 @@ set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 bin="$here/../target/release/oficinad"
 tmp="$(mktemp -d)"
-export FAKE_LOG="$tmp/args.log" OFICINA_CLAUDE="$here/fake_claude.sh"
+export FAKE_LOG="$tmp/args.log" OFICINA_CLAUDE="$here/fake_claude.sh" OFICINA_GH="$here/fake_gh.sh"
+chmod +x "$here/fake_gh.sh"
 export ANTHROPIC_API_KEY=nao-pode-vazar
 chmod +x "$OFICINA_CLAUDE"
 
@@ -21,7 +22,7 @@ OFICINA_HOME="$tmp/b" OFICINA_LISTEN=127.0.0.1:7902 "$bin" 2>/dev/null & pb=$!
 up 7902
 tb=$(cat "$tmp/b/token")
 cat > "$tmp/a/config.json" <<EOF
-{"listen":"127.0.0.1:7901","execute_local":false,
+{"listen":"127.0.0.1:7901","execute_local":false,"repo":"dono/oficina",
  "machines":[{"name":"morta","url":"http://127.0.0.1:7999","token":"x"},
              {"name":"oficina-b","url":"http://127.0.0.1:7902","token":"$tb"}]}
 EOF
@@ -67,6 +68,18 @@ check 'aprovada termina' done "$(wait_for "$id" done\ failed)"
 check 'escolhe máquina online' oficina-b "$(get "$id" machine)"
 check 'executa instrução do cérebro' 'eco: fazer no pc' "$(get "$id" output)"
 check 'aprovar duas vezes: 409' 409 "$(api -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:7901/v1/tasks/$id/approve")"
+
+echo 'pedidos de melhoria'
+id=$(send '{"text":"delegar-melhoria"}'); check 'melhoria pede aprovação' awaiting_approval "$(wait_for "$id" awaiting_approval\ done\ failed)"
+equal 'nada no GitHub antes de aprovar' 0 "$(grep -c '^GH:' "$tmp/args.log")"
+api -o /dev/null -X POST "http://127.0.0.1:7901/v1/tasks/$id/approve"
+check 'abre a issue' done "$(wait_for "$id" done\ failed)"
+check 'link da issue' 'issues/42' "$(get "$id" url)"
+check 'título com o tipo' '[Roupa] chapéu de pirata' "$(grep '^GH:' "$tmp/args.log" | tail -1)"
+check 'etiqueta do agente' '--label agente' "$(grep '^GH:' "$tmp/args.log" | tail -1)"
+rid=$(api -X POST -H 'content-type: application/json' -d '{"kind":"widget","text":"Clima na Dock","agent":false}' http://127.0.0.1:7901/v1/requests | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+check 'pedido pelo menu' done "$(wait_for "$rid" done\ failed)"
+equal 'sem agente quando não pedido' 0 "$(grep '^GH:' "$tmp/args.log" | tail -1 | grep -c 'agente')"
 
 echo 'atalhos e cancelamento'
 id=$(send '{"text":"/pc listar"}'); check '/pc roda direto' done "$(wait_for "$id" done\ failed)"

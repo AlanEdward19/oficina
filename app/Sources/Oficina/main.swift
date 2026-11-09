@@ -249,6 +249,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func suggestNow() { core.suggest() }
     @objc private func putToBed() { pet.putToBed() }
 
+    /// Formulário curto: tipo, pedido e se um agente deve implementar.
+    @objc private func askImprovement() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Pedir melhoria"
+        alert.informativeText = "Vira uma issue pública no GitHub da Oficina."
+        alert.addButton(withTitle: "Abrir issue")
+        alert.addButton(withTitle: "Cancelar")
+        let kinds = [("Funcionalidade", "funcionalidade"), ("Widget da Dock", "widget"), ("Roupinha", "roupa"), ("Casinha", "casa"), ("Problema", "bug")]
+        let kind = NSPopUpButton(frame: .zero, pullsDown: false)
+        kind.addItems(withTitles: kinds.map(\.0))
+        let text = NSTextField(string: "")
+        text.placeholderString = "O que você quer? Ex.: widget de clima na Dock"
+        let agent = NSButton(checkboxWithTitle: "Um agente do Claude implementa e abre um pull request", target: nil, action: nil)
+        agent.state = .on
+        let stack = NSStackView(views: [kind, text, agent])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.frame = NSRect(x: 0, y: 0, width: 320, height: 86)
+        text.widthAnchor.constraint(equalToConstant: 320).isActive = true
+        alert.accessoryView = stack
+        alert.window.initialFirstResponder = text
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let value = text.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        core.sendRequest(kind: kinds[kind.indexOfSelectedItem].1, text: value, agent: agent.state == .on)
+        openChat()
+    }
+
     private func tasksChanged(_ tasks: [TaskItem]) {
         var finished: String?
         var changedStatus = lastStatus.count != tasks.count
@@ -358,6 +388,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         chat.keyEquivalentModifierMask = [.control, .option]
         chat.target = self
         menu.addItem(chat)
+        let ask = NSMenuItem(title: "Pedir melhoria…", action: #selector(askImprovement), keyEquivalent: "")
+        ask.target = self
+        menu.addItem(ask)
         let bed = NSMenuItem(title: "Colocar para dormir", action: #selector(putToBed), keyEquivalent: "")
         bed.target = self
         menu.addItem(bed)

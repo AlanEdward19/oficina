@@ -20,6 +20,8 @@ pub enum Target {
     Chat,
     Cloud,
     Machine,
+    /// Pedido de melhoria: vira uma issue no GitHub.
+    Request,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -45,6 +47,9 @@ pub struct Task {
     pub text: String,
     pub target: Target,
     pub machine: Option<String>,
+    /// Tipo do pedido de melhoria (funcionalidade, widget, roupa, casa, bug).
+    #[serde(default)]
+    pub kind: Option<String>,
     /// Instrução que o cérebro escreveu ao delegar; aguarda aprovação.
     pub prompt: Option<String>,
     pub status: Status,
@@ -107,6 +112,7 @@ impl Store {
             text,
             target,
             machine,
+            kind: None,
             prompt: None,
             status: Status::Queued,
             output: String::new(),

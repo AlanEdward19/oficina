@@ -1,0 +1,16 @@
+name: "Widget da Dock"
+description: "Um widget novo para a Dock"
+labels: ["widget"]
+body:
+  - type: textarea
+    id: pedido
+    attributes:
+      label: "Qual widget"
+      placeholder: "Ex.: clima com a previsão das próximas horas"
+    validations:
+      required: true
+  - type: textarea
+    id: detalhes
+    attributes:
+      label: "Detalhes"
+      description: "Como deveria parecer ou funcionar, exemplos, referências."

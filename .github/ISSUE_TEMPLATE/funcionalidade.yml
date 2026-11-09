@@ -1,0 +1,16 @@
+name: "Funcionalidade"
+description: "Uma coisa nova que a Faísca ou a Oficina deveria fazer"
+labels: ["funcionalidade"]
+body:
+  - type: textarea
+    id: pedido
+    attributes:
+      label: "O que você quer"
+      placeholder: "Ex.: lembrar de beber água a cada hora"
+    validations:
+      required: true
+  - type: textarea
+    id: detalhes
+    attributes:
+      label: "Detalhes"
+      description: "Como deveria parecer ou funcionar, exemplos, referências."

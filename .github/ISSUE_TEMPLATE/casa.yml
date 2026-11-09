@@ -1,0 +1,16 @@
+name: "Casinha"
+description: "Caminhas, mantas ou enfeites novos para a casinha"
+labels: ["casa"]
+body:
+  - type: textarea
+    id: pedido
+    attributes:
+      label: "Qual casinha ou peça"
+      placeholder: "Ex.: caminha de foguete com manta de estrelas"
+    validations:
+      required: true
+  - type: textarea
+    id: detalhes
+    attributes:
+      label: "Detalhes"
+      description: "Como deveria parecer ou funcionar, exemplos, referências."

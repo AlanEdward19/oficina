@@ -220,6 +220,7 @@ private func runningLabel(_ t: TaskItem) -> String {
     switch (t.status, t.target) {
     case ("queued", _): return "Na fila…"
     case (_, "cloud"): return "Abrindo agente na nuvem…"
+    case (_, "request"): return "Abrindo issue no GitHub…"
     case (_, "machine"): return "Trabalhando em \(t.machine ?? "uma máquina")…"
     default: return "Pensando…"
     }
@@ -267,8 +268,8 @@ private struct Turn: View {
 
     @ViewBuilder private var reply: some View {
         if task.target != "auto" && task.target != "chat" {
-            Label(task.target == "cloud" ? "Agente na nuvem" : "Agente em \(task.machine ?? "este Mac")",
-                  systemImage: task.target == "cloud" ? "cloud" : "desktopcomputer")
+            Label(task.target == "cloud" ? "Agente na nuvem" : task.target == "request" ? "Pedido de melhoria" : "Agente em \(task.machine ?? "este Mac")",
+                  systemImage: task.target == "cloud" ? "cloud" : task.target == "request" ? "sparkles.rectangle.stack" : "desktopcomputer")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
         }
@@ -304,7 +305,7 @@ private struct Turn: View {
         }
         if let raw = task.url, let url = URL(string: raw), url.scheme == "https" {
             Link(destination: url) {
-                Label("Abrir sessão na nuvem", systemImage: "arrow.up.right.square")
+                Label(raw.contains("github.com") ? "Abrir issue no GitHub" : "Abrir sessão na nuvem", systemImage: "arrow.up.right.square")
                     .font(.callout.weight(.medium))
             }
         }
@@ -326,18 +327,22 @@ private struct ApprovalCard: View {
     @ObservedObject var core: Core
 
     var body: some View {
+        let request = task.target == "request"
         VStack(alignment: .leading, spacing: 8) {
-            Label("Quero usar seu computador para isto:", systemImage: "hand.raised.fill")
+            Label(request ? "Quero abrir um pedido de melhoria (\(task.kind ?? "funcionalidade")):" : "Quero usar seu computador para isto:",
+                  systemImage: request ? "sparkles.rectangle.stack" : "hand.raised.fill")
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.yellow)
             Text(task.prompt ?? task.text)
                 .font(.callout)
                 .textSelection(.enabled)
-            Text("Posso ler e editar arquivos da pasta de trabalho, sem comandos livres no terminal.")
+            Text(request
+                 ? "Vira uma issue pública no GitHub da Oficina, e um agente do Claude implementa e abre um pull request."
+                 : "Posso ler e editar arquivos da pasta de trabalho, sem comandos livres no terminal.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Button("Executar neste Mac") { core.act(task.id, "approve") }
+                Button(request ? "Abrir issue" : "Executar neste Mac") { core.act(task.id, "approve") }
                     .buttonStyle(.borderedProminent)
                 Button("Recusar") { core.act(task.id, "cancel") }
             }

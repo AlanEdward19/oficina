@@ -72,6 +72,16 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
   fechar à força com a substituição ligada:
   `defaults delete com.apple.dock autohide-delay && killall Dock`
 
+## Pedidos de melhoria
+
+- No chat ("faz uma roupa de pirata pra você"), o cérebro reconhece o pedido e delega como melhoria, com o
+  tipo (funcionalidade, widget, roupa, casa, bug). Como abrir issue é publicar, o chat pede aprovação.
+- Pelo menu **Pedir melhoria…** o pedido sai na hora, com a opção de pedir um agente.
+- O core abre a issue com o `gh` no repositório de `repo` (config.json). A etiqueta `agente` dispara o
+  workflow `.github/workflows/agente.yml`, em que um agente do Claude implementa e abre um PR; o CI compila e
+  testa. Qualquer pessoa pode abrir issues pelos modelos; só quem tem escrita aplica `agente`.
+- Guia para quem contribui: [CONTRIBUTING.md](../CONTRIBUTING.md).
+
 ## Limites conhecidos
 
 - **CPU do app:** parado, cerca de 0,5%. A Faísca vive num palco transparente da tela inteira que ignora o

@@ -29,7 +29,10 @@ const BRAIN_DELEGATE: &str = " Se o pedido exigir trabalho real (programar, pesq
 mexer em arquivos), não finja que fez: responda SOMENTE com uma linha no formato \
 `@@delegar nuvem: <instrução completa>` para agentes na nuvem, ou \
 `@@delegar maquina: <instrução completa>` quando precisar do computador do usuário. \
-Sem texto antes ou depois da linha. Conversa e perguntas simples você responde normalmente.";
+Sem texto antes ou depois da linha. Conversa e perguntas simples você responde normalmente. \
+Se o usuário pedir uma melhoria em você mesma ou na Oficina (funcionalidade nova, widget da Dock, roupinha, \
+casinha, ou um problema), responda SOMENTE com `@@delegar melhoria: <funcionalidade|widget|roupa|casa|bug>: \
+<descrição clara do pedido>`.";
 
 pub struct Engine {
     pub store: Arc<Store>,
@@ -65,6 +68,17 @@ struct RunOut {
 }
 
 /// Procura o `claude` também onde um app gráfico não enxerga pelo PATH.
+fn find_gh() -> PathBuf {
+    if let Some(p) = std::env::var_os("OFICINA_GH") {
+        return PathBuf::from(p);
+    }
+    ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("gh"))
+}
+
 fn find_claude() -> PathBuf {
     if let Some(p) = std::env::var_os("OFICINA_CLAUDE") {
         return PathBuf::from(p);
@@ -189,6 +203,7 @@ impl Engine {
             Target::Chat => self.run_brain(&id, &t.text, false).await,
             Target::Cloud => self.run_cloud(&id, &t.text).await,
             Target::Machine => self.run_machine(&id, &t.text).await,
+            Target::Request => {}
         }
     }
 
@@ -205,8 +220,88 @@ impl Engine {
         }
         let task = self.store.update(id, |t| t.status = Status::Queued)?;
         let (me, id, prompt) = (self.clone(), id.to_string(), t.prompt.unwrap_or(t.text));
-        tokio::spawn(async move { me.run_machine(&id, &prompt).await });
+        if t.target == Target::Request {
+            let kind = t.kind.unwrap_or_else(|| "funcionalidade".into());
+            tokio::spawn(async move { me.run_request(&id, &kind, &prompt, true).await });
+        } else {
+            tokio::spawn(async move { me.run_machine(&id, &prompt).await });
+        }
         Some(task)
+    }
+
+    /// Pedido feito direto pelo usuário (menu): abre a issue na hora.
+    pub fn request(self: &Arc<Self>, kind: &str, text: &str, agent: bool) -> Result<Task, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("pedido vazio".into());
+        }
+        let kind = if route::REQUEST_KINDS.contains(&kind) { kind } else { "funcionalidade" };
+        let task = self.store.create(text.to_string(), Target::Request, None);
+        self.store.update(&task.id, |t| t.kind = Some(kind.to_string()));
+        let (me, id, kind, text) = (self.clone(), task.id.clone(), kind.to_string(), text.to_string());
+        tokio::spawn(async move { me.run_request(&id, &kind, &text, agent).await });
+        Ok(task)
+    }
+
+    /// Abre a issue com o `gh`. Com `agent`, a etiqueta "agente" faz um
+    /// agente do Claude implementar no próprio GitHub e abrir um PR.
+    async fn run_request(self: &Arc<Self>, id: &str, kind: &str, text: &str, agent: bool) {
+        if !self.start(id) {
+            return;
+        }
+        let Some(repo) = self.cfg.repo.clone() else {
+            return self.finish(id, Err("A Oficina ainda não tem repositório no GitHub. Defina \"repo\" no config.json.".into()));
+        };
+        let first: String = text.lines().next().unwrap_or(text).chars().take(70).collect();
+        let label = match kind {
+            "widget" => "Widget",
+            "roupa" => "Roupa",
+            "casa" => "Casa",
+            "bug" => "Problema",
+            _ => "Funcionalidade",
+        };
+        let title = format!("[{label}] {first}");
+        let body = format!("{text}\n\n---\nPedido feito pela Faísca, na Oficina.");
+        let mut labels = vec![kind.to_string()];
+        if agent {
+            labels.push("agente".into());
+        }
+        let run = |with_labels: bool| {
+            let mut cmd = Command::new(find_gh());
+            cmd.args(["issue", "create", "--repo", &repo, "--title", &title, "--body", &body]);
+            if with_labels {
+                for l in &labels {
+                    cmd.args(["--label", l]);
+                }
+            }
+            cmd.stdin(Stdio::null()).kill_on_drop(true);
+            cmd
+        };
+        let mut out = tokio::time::timeout(Duration::from_secs(60), run(true).output()).await;
+        // Etiqueta que não existe no repositório não pode travar o pedido.
+        if let Ok(Ok(o)) = &out {
+            if !o.status.success() && String::from_utf8_lossy(&o.stderr).to_lowercase().contains("label") {
+                out = tokio::time::timeout(Duration::from_secs(60), run(false).output()).await;
+            }
+        }
+        let result = match out {
+            Err(_) => Err("O GitHub demorou demais para responder.".to_string()),
+            Ok(Err(e)) => Err(format!("Não consegui executar o gh: {e}")),
+            Ok(Ok(o)) if o.status.success() => {
+                let url = String::from_utf8_lossy(&o.stdout).lines().rev()
+                    .find(|l| l.starts_with("https://")).map(|l| l.trim().to_string());
+                if let Some(url) = url.clone() {
+                    self.store.update(id, |t| t.url = Some(url));
+                }
+                Ok(Some(if agent {
+                    "Abri a issue e pedi para um agente implementar. Ele abre um pull request quando terminar.".to_string()
+                } else {
+                    "Abri a issue no GitHub.".to_string()
+                }))
+            }
+            Ok(Ok(o)) => Err(tail(String::from_utf8_lossy(&o.stderr).trim())),
+        };
+        self.finish(id, result);
     }
 
     pub fn cancel(self: &Arc<Self>, id: &str) -> Option<Task> {
@@ -405,6 +500,17 @@ impl Engine {
             Some((Dest::Machine, prompt)) => {
                 self.store.update(id, |t| {
                     t.target = Target::Machine;
+                    t.prompt = Some(prompt);
+                    if t.status != Status::Cancelled {
+                        t.status = Status::AwaitingApproval;
+                    }
+                });
+            }
+            // Abrir issue é publicar: pede aprovação, com o agente já incluído.
+            Some((Dest::Request(kind), prompt)) => {
+                self.store.update(id, |t| {
+                    t.target = Target::Request;
+                    t.kind = Some(kind);
                     t.prompt = Some(prompt);
                     if t.status != Status::Cancelled {
                         t.status = Status::AwaitingApproval;

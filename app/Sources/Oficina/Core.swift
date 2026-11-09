@@ -5,6 +5,7 @@ struct TaskItem: Identifiable, Decodable, Equatable {
     let text: String
     var target: String
     var machine: String?
+    var kind: String?
     var prompt: String?
     var status: String
     var output: String
@@ -13,7 +14,7 @@ struct TaskItem: Identifiable, Decodable, Equatable {
     let createdAt: UInt64
 
     enum CodingKeys: String, CodingKey {
-        case id, text, target, machine, prompt, status, output, url, error
+        case id, text, target, machine, kind, prompt, status, output, url, error
         case createdAt = "created_at"
     }
 
@@ -244,6 +245,11 @@ final class Core: ObservableObject {
 
     func forgetMind() {
         Task { _ = await post("mind/forget") }
+    }
+
+    /// Pedido de melhoria: vira uma issue no GitHub (e, se quiser, um agente).
+    func sendRequest(kind: String, text: String, agent: Bool) {
+        Task { _ = await post("requests", json: ["kind": kind, "text": text, "agent": agent]) }
     }
 
     func createDecor(suggestion: String?) {

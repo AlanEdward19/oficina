@@ -41,6 +41,11 @@ A Dock da Oficina fica na base da tela, com ambientes (Trabalho, Pessoal…). �
 e escondem os apps que são só do anterior. Clique direito num ícone fixa, remove ou move o app; clique
 direito nos ambientes cria, renomeia ou apaga. Os ambientes ficam em `dock.json`.
 
+## Contribuir
+
+Pedidos de funcionalidades, widgets, roupinhas e casinhas viram issues no GitHub; issues com a etiqueta
+`agente` são implementadas por um agente do Claude. Veja o [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Desenvolvimento
 
 ```bash

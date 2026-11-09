@@ -154,6 +154,21 @@ async fn mind_forget(State(app): State<App>) -> StatusCode {
 }
 
 #[derive(Deserialize)]
+struct RequestBody {
+    kind: String,
+    text: String,
+    #[serde(default)]
+    agent: bool,
+}
+
+async fn create_request(State(app): State<App>, Json(r): Json<RequestBody>) -> Response {
+    match app.engine.request(&r.kind, &r.text, r.agent) {
+        Ok(task) => (StatusCode::CREATED, Json(task)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
 struct DecorWish {
     suggestion: Option<String>,
 }
@@ -229,6 +244,7 @@ async fn main() {
         .route("/v1/tasks/{id}/cancel", post(cancel))
         .route("/v1/events", get(events))
         .route("/v1/brain/reset", post(brain_reset))
+        .route("/v1/requests", post(create_request))
         .route("/v1/mind", get(mind))
         .route("/v1/mind/events", post(mind_events))
         .route("/v1/mind/suggest", post(mind_suggest))

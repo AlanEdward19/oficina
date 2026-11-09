@@ -25,6 +25,8 @@ pub struct Config {
     /// Ferramentas liberadas para agentes que rodam nesta máquina.
     pub allowed_tools: Vec<String>,
     pub machines: Vec<Peer>,
+    /// Repositório da Oficina no GitHub ("dono/nome"), para pedidos de melhoria.
+    pub repo: Option<String>,
 }
 
 impl Default for Config {
@@ -50,6 +52,7 @@ impl Default for Config {
             .map(String::from)
             .to_vec(),
             machines: vec![],
+            repo: None,
         }
     }
 }

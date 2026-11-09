@@ -1,0 +1,16 @@
+name: "Roupinha"
+description: "Peças ou temas novos de roupinha para a Faísca"
+labels: ["roupa"]
+body:
+  - type: textarea
+    id: pedido
+    attributes:
+      label: "Qual roupinha ou peça"
+      placeholder: "Ex.: chapéu de pirata e tapa-olho"
+    validations:
+      required: true
+  - type: textarea
+    id: detalhes
+    attributes:
+      label: "Detalhes"
+      description: "Como deveria parecer ou funcionar, exemplos, referências."

@@ -1,0 +1,16 @@
+name: "Problema"
+description: "Algo que não funciona como deveria"
+labels: ["bug"]
+body:
+  - type: textarea
+    id: pedido
+    attributes:
+      label: "O que aconteceu"
+      placeholder: "O que você fez, o que esperava e o que aconteceu"
+    validations:
+      required: true
+  - type: textarea
+    id: detalhes
+    attributes:
+      label: "Detalhes"
+      description: "Como deveria parecer ou funcionar, exemplos, referências."

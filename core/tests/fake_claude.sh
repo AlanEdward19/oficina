@@ -31,6 +31,7 @@ delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","
 echo '{"type":"system","subtype":"init","session_id":"sess-1"}'
 
 case "$prompt" in
+  *delegar-melhoria*) t='@@delegar melhoria: roupa: chapéu de pirata com tapa-olho' ;;
   *delegar-nuvem*) t='@@delegar nuvem: fazer na nuvem' ;;
   *delegar-pc*)    t='@@delegar maquina: fazer no pc' ;;
   *lento*)         trap 'exit 130' INT; sleep 30 & wait; t='nunca' ;;

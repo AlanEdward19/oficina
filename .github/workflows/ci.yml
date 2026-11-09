@@ -1,0 +1,16 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Testes do core
+        run: cd core && cargo test
+      - name: Ponta a ponta (claude falso)
+        run: cd core && cargo build --release && bash tests/e2e.sh
+      - name: App
+        run: cd app && swift build -c release

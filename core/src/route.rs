@@ -9,7 +9,11 @@ const MARKER: &str = "@@delegar ";
 pub enum Dest {
     Cloud,
     Machine,
+    /// Melhoria na própria Faísca, com o tipo.
+    Request(String),
 }
+
+pub const REQUEST_KINDS: [&str; 5] = ["funcionalidade", "widget", "roupa", "casa", "bug"];
 
 /// Um alvo explícito vence; depois, atalhos no início do texto.
 pub fn resolve(target: Target, text: &str) -> (Target, String) {
@@ -36,9 +40,16 @@ pub fn resolve(target: Target, text: &str) -> (Target, String) {
 pub fn parse_delegate(text: &str) -> Option<(Dest, String)> {
     let rest = text.trim().strip_prefix(MARKER)?;
     let (dest, prompt) = rest.split_once(':')?;
-    let dest = match dest.trim() {
-        "nuvem" => Dest::Cloud,
-        "maquina" | "máquina" => Dest::Machine,
+    let (dest, prompt) = match dest.trim() {
+        "nuvem" => (Dest::Cloud, prompt),
+        "maquina" | "máquina" => (Dest::Machine, prompt),
+        // `@@delegar melhoria: roupa: chapéu de pirata`
+        "melhoria" => {
+            let (kind, text) = prompt.split_once(':').unwrap_or(("funcionalidade", prompt));
+            let kind = kind.trim().to_lowercase();
+            let kind = if REQUEST_KINDS.contains(&kind.as_str()) { kind } else { "funcionalidade".into() };
+            (Dest::Request(kind), text)
+        }
         _ => return None,
     };
     let prompt = prompt.trim();
@@ -196,6 +207,22 @@ mod tests {
         assert_eq!(
             parse_delegate(" @@delegar maquina: abrir x\n"),
             Some((Dest::Machine, "abrir x".into()))
+        );
+    }
+
+    #[test]
+    fn delegacao_de_melhoria_com_tipo() {
+        assert_eq!(
+            parse_delegate("@@delegar melhoria: roupa: chapéu de pirata"),
+            Some((Dest::Request("roupa".into()), "chapéu de pirata".into()))
+        );
+        assert_eq!(
+            parse_delegate("@@delegar melhoria: Clima na Dock"),
+            Some((Dest::Request("funcionalidade".into()), "Clima na Dock".into()))
+        );
+        assert_eq!(
+            parse_delegate("@@delegar melhoria: xyz: algo"),
+            Some((Dest::Request("funcionalidade".into()), "algo".into()))
         );
     }
 
