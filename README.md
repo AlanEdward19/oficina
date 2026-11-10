@@ -50,8 +50,8 @@ Oficina puts all three in one small native app. The creature on your screen is t
 
 <table>
   <tr>
-    <td width="42%"><img src="docs/media/personalize.png" alt="The Personalize window: a macOS settings form with a live preview of Faísca, appearance, personality and brain options"></td>
-    <td width="58%"><img src="docs/media/factory.png" alt="The Factory window: a sidebar of agents and teams, with an agent page showing its mission paused at the approval stage"></td>
+    <td width="42%"><img src="docs/media/personalize.png" alt="The Personalize screen: Faísca on stage with her name, next to colors, eyes, ways of speaking and brain options"></td>
+    <td width="58%"><img src="docs/media/factory.png" alt="The Factory: agents grouped by team, each standing on a production line at the current stage of its mission"></td>
   </tr>
 </table>
 

@@ -58,7 +58,7 @@ A new outfit or house piece needs two changes: its name goes in the core vocabul
 
 - Match the style of the surrounding code.
 - Write interface text in Brazilian Portuguese, short and direct.
-- Screens use standard macOS components: regular windows, sidebars, `Form`, toolbars and system alerts. No gradients, colored cards or rounded fonts.
+- Screens follow the Bench language in `Theme.swift`: one surface, hierarchy through type and hairlines, one filled action per screen, and an accent taken from Faísca's color. No gradients, cards or rounded fonts.
 - Continuous animation goes to Core Animation, never to per-frame timers in the app.
 - Keep dependencies to a minimum; discuss new ones in the issue first.
 - Never commit secrets, API keys or real user data. Test fixtures must be synthetic.

@@ -11,6 +11,8 @@ rm -rf "$root/build/Oficina.app"
 mkdir -p "$out/MacOS"
 cp "$root/app/.build/release/Oficina" "$out/MacOS/Oficina"
 cp "$root/core/target/release/oficinad" "$out/MacOS/oficinad"
+mkdir -p "$out/Resources"
+cp -R "$root/app/Localization/"*.lproj "$out/Resources/"
 strip "$out/MacOS/Oficina" 2>/dev/null || true
 strip "$out/MacOS/oficinad" 2>/dev/null || true
 
