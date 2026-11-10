@@ -76,17 +76,6 @@ func hexFromColor(_ c: Color) -> String {
     return String(format: "#%02X%02X%02X", Int(n.redComponent * 255), Int(n.greenComponent * 255), Int(n.blueComponent * 255))
 }
 
-/// Rodapé de seção alinhado à esquerda, como nos Ajustes do Sistema.
-private struct FormNote: View {
-    let text: String
-
-    init(_ text: String) { self.text = text }
-
-    var body: some View {
-        Text(text).foregroundStyle(.secondary).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
 // MARK: Personalizar
 
 private let traits = [
@@ -97,62 +86,37 @@ private let traits = [
 ]
 
 private let eyeStyles = [("tall", "Compridos"), ("round", "Redondos"), ("dots", "Pontinhos")]
+private let swatches = ["#FF9E29", "#FF5C7A", "#B56CFF", "#4D8DFF", "#22C3A6", "#7ED957", "#FFD60A", "#E9E9EF"]
+private let modelWords = modelInfos.map { (id: $0.id, title: $0.name) }
+
+private func sectionTitle(_ t: String) -> some View {
+    Text(loc(t)).font(.system(size: 13, weight: .semibold))
+}
 
 struct PersonalizeView: View {
     @ObservedObject var core: Core
     @State private var s = AssistantSettings()
 
-    private var style: Binding<String> {
-        Binding(
-            get: { traits.contains { $0.text == s.personality } ? s.personality : "" },
-            set: { s.personality = $0 }
-        )
-    }
+    private var tint: Color { colorFromHex(s.body_color) }
 
     var body: some View {
-        Form {
-            Section {
-                LivePet(settings: s, side: 96)
-                    .frame(maxWidth: .infinity)
-                    .accessibilityHidden(true)
-                TextField("Nome", text: $s.name)
-            }
-            Section("Aparência") {
-                color("Cor do Corpo", $s.body_color)
-                Picker("Olhos", selection: $s.eyes) {
-                    ForEach(eyeStyles, id: \.0) { Text($0.1).tag($0.0) }
+        HStack(spacing: 0) {
+            stage.frame(width: 340)
+            Rectangle().fill(Bench.line).frame(width: 1)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 34) {
+                    looks
+                    voice
+                    brain
                 }
-                Toggle("Antena", isOn: $s.antenna)
-                color("Cor da Antena", $s.spark_color).disabled(!s.antenna)
-                Slider(value: $s.size, in: 0.7...1.4) { Text("Tamanho") }
-            }
-            Section("Personalidade") {
-                Picker("Estilo", selection: style) {
-                    ForEach(traits, id: \.name) { Text($0.name).tag($0.text) }
-                    Divider()
-                    Text("Personalizado").tag("")
-                }
-                TextField("Descrição", text: $s.personality, prompt: Text("Descreva do seu jeito"), axis: .vertical)
-                    .lineLimit(2...4)
-                    .labelsHidden()
-            }
-            Section {
-                Picker("Modelo", selection: $s.brain_model) {
-                    ForEach(modelInfos, id: \.id) { Text($0.name).tag($0.id) }
-                }
-                Picker("Esforço", selection: $s.brain_effort) {
-                    Text("Padrão").tag("")
-                    ForEach(effortLevels, id: \.self) { Text(effortNames[$0] ?? $0).tag($0) }
-                }
-            } header: {
-                Text("Cérebro")
-            } footer: {
-                FormNote(modelInfo(s.brain_model)?.note ?? "")
+                .padding(.horizontal, 40)
+                .padding(.top, 48)
+                .padding(.bottom, 40)
             }
         }
-        .formStyle(.grouped)
-        .frame(minWidth: 440, minHeight: 480)
-        .navigationTitle("Personalizar")
+        .frame(minWidth: 800, minHeight: 560)
+        .background(Bench.canvas)
+        .ignoresSafeArea()
         .onAppear { s = core.settings }
         // Salva sozinho, com uma pausa para não gravar a cada letra.
         .task(id: s) {
@@ -161,8 +125,125 @@ struct PersonalizeView: View {
         }
     }
 
-    private func color(_ title: String, _ value: Binding<String>) -> some View {
-        ColorPicker(title, selection: Binding(get: { colorFromHex(value.wrappedValue) }, set: { value.wrappedValue = hexFromColor($0) }), supportsOpacity: false)
+    /// A Faísca em cena, em cima do chão, com o nome dela.
+    private var stage: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            LivePet(settings: s, side: 230).frame(width: 230, height: 230).accessibilityHidden(true)
+            Rectangle().fill(Bench.line).frame(height: 1).padding(.horizontal, 36)
+            TextField("", text: $s.name, prompt: Text(loc("Nome")).foregroundStyle(Bench.faint))
+                .textFieldStyle(.plain)
+                .font(Bench.display(40))
+                .tracking(-1)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(loc("Nome"))
+                .padding(.horizontal, 24)
+                .padding(.top, 22)
+            Slider(value: $s.size, in: 0.7...1.4) { Text(loc("Tamanho")) }
+                .labelsHidden()
+                .tint(tint)
+                .frame(width: 150)
+                .padding(.top, 14)
+            Spacer()
+        }
+    }
+
+    private var looks: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            colorRow("Corpo", $s.body_color)
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                colorRow("Antena", $s.spark_color).opacity(s.antenna ? 1 : 0.35).disabled(!s.antenna)
+                Spacer(minLength: 8)
+                Button(loc(s.antenna ? "Tirar" : "Pôr de volta")) { s.antenna.toggle() }
+                    .buttonStyle(QuietStyle(tint: tint))
+            }
+            HStack(spacing: 22) {
+                sectionTitle("Olhos").frame(width: 62, alignment: .leading)
+                ForEach(eyeStyles, id: \.0) { eye($0.0, $0.1) }
+            }
+        }
+    }
+
+    private func colorRow(_ title: String, _ value: Binding<String>) -> some View {
+        HStack(spacing: 10) {
+            sectionTitle(title).frame(width: 62, alignment: .leading)
+            ForEach(swatches, id: \.self) { hex in
+                let on = value.wrappedValue.caseInsensitiveCompare(hex) == .orderedSame
+                Button { value.wrappedValue = hex } label: {
+                    Circle()
+                        .fill(colorFromHex(hex))
+                        .frame(width: 18, height: 18)
+                        .padding(3)
+                        .overlay(Circle().strokeBorder(on ? Color.primary : .clear, lineWidth: 1.5))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(loc(title)) \(hex)")
+                .accessibilityAddTraits(on ? .isSelected : [])
+            }
+            ColorPicker(loc(title), selection: Binding(get: { colorFromHex(value.wrappedValue) }, set: { value.wrappedValue = hexFromColor($0) }), supportsOpacity: false)
+                .labelsHidden()
+                .controlSize(.small)
+        }
+    }
+
+    private func eye(_ id: String, _ title: String) -> some View {
+        let on = s.eyes == id
+        return Button { s.eyes = id } label: {
+            HStack(spacing: 7) {
+                HStack(spacing: 3) {
+                    ForEach(0..<2, id: \.self) { _ in
+                        Capsule().fill(on ? Color.primary : Bench.faint).frame(width: 4, height: id == "tall" ? 13 : id == "round" ? 7 : 4)
+                    }
+                }
+                .frame(width: 18, height: 16)
+                Text(loc(title))
+                    .font(.system(size: 13, weight: on ? .semibold : .regular))
+                    .foregroundStyle(on ? Color.primary : Bench.faint)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    /// Frase escolhida na lista não se repete no campo livre.
+    private var ownVoice: Binding<String> {
+        Binding(
+            get: { traits.contains { $0.text == s.personality || loc($0.text) == s.personality } ? "" : s.personality },
+            set: { s.personality = $0 }
+        )
+    }
+
+    private var voice: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Jeito de falar")
+            ForEach(traits, id: \.name) { t in
+                let on = s.personality == t.text || s.personality == loc(t.text)
+                Button { s.personality = loc(t.text) } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Circle().fill(on ? tint : .clear).frame(width: 7, height: 7).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                        Text(loc(t.text))
+                            .font(.system(size: 14))
+                            .foregroundStyle(on ? Color.primary : Bench.faint)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(on ? .isSelected : [])
+            }
+            HairField(prompt: "Ou descreva do seu jeito", text: ownVoice, lines: 1...3).padding(.top, 4)
+        }
+    }
+
+    private var brain: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("Cérebro")
+            WordPicker(options: modelWords, selection: $s.brain_model, tint: tint)
+            WordPicker(options: [("", "Padrão")] + effortLevels.map { ($0, effortNames[$0] ?? $0) }, selection: $s.brain_effort, tint: tint)
+            Text(loc(modelInfo(s.brain_model)?.note ?? "")).font(.system(size: 12)).foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -170,10 +251,50 @@ struct PersonalizeView: View {
 
 private let stageNames = ["Investigar", "Propor", "Executar", "Verificar"]
 
-private enum FactoryPick: Hashable {
-    case overview
-    case agent(String)
-    case team(String)
+/// A linha de produção: o agente fica em cima da etapa em que está.
+private struct ProductionLine: View {
+    let agent: AgentItem
+    let tint: Color
+
+    private let creature: CGFloat = 32
+    private let lineY: CGFloat = 46
+
+    var body: some View {
+        GeometryReader { geo in
+            let m = agent.mission
+            let stage = min(m?.stage ?? 0, 3)
+            let inset: CGFloat = 26
+            let step = (geo.size.width - inset * 2) / 3
+            let x = { (i: Int) in inset + CGFloat(i) * step }
+            ZStack(alignment: .topLeading) {
+                Rectangle().fill(Bench.line).frame(width: step * 3, height: 2).offset(x: inset, y: lineY - 1)
+                if m != nil, stage > 0 {
+                    Rectangle().fill(tint).frame(width: CGFloat(stage) * step, height: 2).offset(x: inset, y: lineY - 1)
+                }
+                ForEach(0..<4, id: \.self) { i in
+                    Circle()
+                        .fill(m != nil && i <= stage ? tint : Bench.canvas)
+                        .overlay(Circle().strokeBorder(m != nil && i <= stage ? tint : Bench.faint, lineWidth: 1.5))
+                        .frame(width: 8, height: 8)
+                        .position(x: x(i), y: lineY)
+                    if m != nil {
+                        Text(loc(stageNames[i]))
+                            .font(.system(size: 11, weight: i == stage ? .semibold : .regular))
+                            .foregroundStyle(i == stage ? Color.primary : Bench.faint)
+                            .fixedSize()
+                            .position(x: x(i), y: lineY + 18)
+                    }
+                }
+                Bob(active: agent.status == "trabalhando", content: AgentAvatar(name: agent.name, size: creature))
+                    .frame(width: creature, height: creature)
+                    .position(x: x(stage), y: lineY - creature / 2 - 5)
+                    .animation(.easeInOut(duration: 0.5), value: stage)
+            }
+        }
+        .frame(height: 76)
+        .accessibilityElement()
+        .accessibilityLabel(agent.mission.map { loc(stageNames[min($0.stage, 3)]) } ?? loc("Sem missão"))
+    }
 }
 
 private struct Removal: Identifiable {
@@ -188,7 +309,6 @@ struct FactoryView: View {
     @ObservedObject var core: Core
     let openConversation: (String) -> Void
     @State private var state = FactoryState()
-    @State private var pick: FactoryPick? = .overview
     @State private var creatingAgent = false
     @State private var creatingTeam = false
     @State private var name = ""
@@ -203,48 +323,22 @@ struct FactoryView: View {
     @State private var problem: String?
     @State private var removal: Removal?
 
+    private var tint: Color { colorFromHex(core.settings.body_color) }
     private var showProblem: Binding<Bool> {
         Binding(get: { problem != nil && !creatingAgent }, set: { if !$0 { problem = nil } })
     }
-
     private var showRemoval: Binding<Bool> {
         Binding(get: { removal != nil }, set: { if !$0 { removal = nil } })
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $pick) {
-                Label("Visão Geral", systemImage: "square.grid.2x2").tag(FactoryPick.overview)
-                if !state.agents.isEmpty {
-                    Section("Agentes") {
-                        ForEach(state.agents) { sidebarRow($0).tag(FactoryPick.agent($0.id)) }
-                    }
-                }
-                if !state.teams.isEmpty {
-                    Section("Equipes") {
-                        ForEach(state.teams) { Label($0.name, systemImage: "number").tag(FactoryPick.team($0.id)) }
-                    }
-                }
-            }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 280)
-        } detail: {
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .navigationTitle("Fábrica")
-                .navigationSubtitle(subtitle)
-                .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        Menu {
-                            Button("Novo Agente…", action: startAgent)
-                            Button("Nova Equipe…") { creatingTeam = true }
-                        } label: {
-                            Label("Adicionar", systemImage: "plus")
-                        }
-                        .help("Adicionar agente ou equipe")
-                    }
-                }
+        Group {
+            if state.agents.isEmpty && state.teams.isEmpty { empty } else { floor }
         }
-        .frame(minWidth: 680, minHeight: 460)
+        .frame(minWidth: 720, minHeight: 480)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Bench.canvas)
+        .ignoresSafeArea()
         .task {
             while !Task.isCancelled {
                 await refresh()
@@ -268,213 +362,156 @@ struct FactoryView: View {
         }
     }
 
+    private var empty: some View {
+        VStack(spacing: 14) {
+            AgentAvatar(name: "Faísca", size: 56)
+            Text(loc("A fábrica está parada.")).font(Bench.display(28)).tracking(-0.6)
+            Button(loc("Novo agente"), action: startAgent).buttonStyle(SolidStyle())
+        }
+    }
+
+    private var floor: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 40) {
+                header
+                ForEach(state.teams) { team in
+                    teamBlock(team, state.agents.filter { $0.team == team.id })
+                }
+                let loose = state.agents.filter { a in !state.teams.contains { $0.id == a.team } }
+                if !loose.isEmpty { lanes(loose, title: state.teams.isEmpty ? nil : "Sem equipe") }
+                if let r = state.router, r.haiku + r.sonnet + r.opus > 0 { routerLine(r) }
+            }
+            .padding(.horizontal, 44)
+            .padding(.top, 52)
+            .padding(.bottom, 36)
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .lastTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(loc("Fábrica")).font(Bench.display(44)).tracking(-1.2)
+                Text(subtitle).font(.system(size: 14)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(loc("Nova equipe")) { creatingTeam = true }.buttonStyle(QuietStyle(tint: tint))
+                .padding(.trailing, 14)
+            Button(loc("Novo agente"), action: startAgent).buttonStyle(SolidStyle())
+        }
+    }
+
     private var subtitle: String {
         let working = state.agents.filter { $0.status == "trabalhando" }.count
-        let count = "\(state.agents.count) \(state.agents.count == 1 ? "agente" : "agentes")"
-        return working > 0 ? "\(count), \(working) trabalhando" : count
+        let waiting = state.agents.filter { $0.status == "aguardando" }.count
+        let count = loc(state.agents.count == 1 ? "%@ agente" : "%@ agentes", "\(state.agents.count)")
+        if waiting > 0 { return loc("%@, %@ esperando você", count, "\(waiting)") }
+        return working > 0 ? loc("%@, %@ trabalhando", count, "\(working)") : count
     }
 
-    private func sidebarRow(_ a: AgentItem) -> some View {
-        HStack {
-            Label {
-                Text(a.name).lineLimit(1)
-            } icon: {
-                AgentAvatar(name: a.name, size: 18)
-            }
-            Spacer(minLength: 0)
-            statusMark(a.status)
-        }
-    }
-
-    @ViewBuilder private func statusMark(_ s: String?) -> some View {
-        switch s {
-        case "trabalhando": ProgressView().controlSize(.mini).accessibilityLabel("Trabalhando")
-        case "aguardando": Image(systemName: "hand.raised.fill").font(.caption).foregroundStyle(.orange).accessibilityLabel("Aguardando você")
-        case "erro": Image(systemName: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.red).accessibilityLabel("Com erro")
-        default: EmptyView()
-        }
-    }
-
-    @ViewBuilder private var detail: some View {
-        switch pick {
-        case .agent(let id):
-            if let a = state.agents.first(where: { $0.id == id }) { agentPage(a) } else { overview }
-        case .team(let id):
-            if let t = state.teams.first(where: { $0.id == id }) { teamPage(t) } else { overview }
-        default:
-            overview
-        }
-    }
-
-    // MARK: Visão geral
-
-    @ViewBuilder private var overview: some View {
-        if state.agents.isEmpty && state.teams.isEmpty {
-            ContentUnavailableView {
-                Label("Nenhum Agente", systemImage: "person.2")
-            } description: {
-                Text("Crie um agente aqui ou peça no chat.")
-            } actions: {
-                Button("Novo Agente…", action: startAgent)
-            }
-        } else {
-            Form {
-                Section {
-                    LabeledContent("Agentes", value: "\(state.agents.count)")
-                    LabeledContent("Trabalhando", value: "\(state.agents.filter { $0.status == "trabalhando" }.count)")
-                    LabeledContent("Equipes", value: "\(state.teams.count)")
+    private func teamBlock(_ team: TeamItem, _ crew: [AgentItem]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Text(team.name).font(.system(size: 20, weight: .semibold)).tracking(-0.3)
+                Button(loc("Abrir canal")) { openConversation(team.conversation) }.buttonStyle(QuietStyle(tint: tint))
+                Spacer()
+                Button(loc("Apagar equipe…")) {
+                    removal = Removal(path: "teams/\(team.id)", title: loc("Apagar a equipe %@?", team.name), message: loc("Os agentes continuam na Fábrica, sem equipe."), action: loc("Apagar"))
                 }
-                if let r = state.router { routerSection(r) }
+                .buttonStyle(QuietStyle(tint: .red))
             }
-            .formStyle(.grouped)
+            .padding(.bottom, 10)
+            Rectangle().fill(Bench.line).frame(height: 1)
+            if crew.isEmpty {
+                Text(loc("Ninguém nesta equipe ainda.")).font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 18)
+            }
+            ForEach(crew) { lane($0) }
         }
     }
 
-    private func routerSection(_ r: RouterStats) -> some View {
-        Section {
-            LabeledContent("Haiku", value: "\(r.haiku)")
-            LabeledContent("Sonnet", value: "\(r.sonnet)")
-            LabeledContent("Opus", value: "\(r.opus)")
-            LabeledContent("Subidas de Modelo", value: "\(r.escalations)")
-            LabeledContent("Resultados Aprendidos", value: "\(r.learned)")
-        } header: {
-            Text("Modelo Automático")
-        } footer: {
-            FormNote("Cada tarefa vai para o modelo mais barato que dá conta. Se ele falhar, sobe um degrau e aprende.")
+    private func lanes(_ list: [AgentItem], title: String?) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let title {
+                Text(loc(title)).font(.system(size: 20, weight: .semibold)).tracking(-0.3).padding(.bottom, 10)
+            }
+            Rectangle().fill(Bench.line).frame(height: 1)
+            ForEach(list) { lane($0) }
         }
     }
 
-    // MARK: Agente
-
-    private func agentPage(_ a: AgentItem) -> some View {
-        Form {
-            Section {
-                HStack(spacing: 12) {
-                    AgentAvatar(name: a.name, size: 44)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(a.name).font(.headline).lineLimit(1)
-                        Text(statusName(a.status)).font(.subheadline).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Nova Missão…") { missionFor = a }
-                    Button("Conversar") { openConversation(a.conversation) }
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-            Section {
-                LabeledContent("Papel") { Text(a.role).textSelection(.enabled) }
-                LabeledContent("Modelo", value: a.place == "nuvem" ? "Padrão da nuvem" : (modelInfo(a.model)?.name ?? a.model.capitalized))
-                LabeledContent("Esforço", value: effortNames[a.effort] ?? a.effort)
-                LabeledContent("Onde Roda", value: a.place == "nuvem" ? "Nuvem" : "Este Mac")
-                if let p = a.project { LabeledContent("Projeto", value: p.components(separatedBy: "/").last ?? p) }
-                Picker("Equipe", selection: Binding(
-                    get: { a.team ?? "" },
-                    set: { new in Task { _ = await core.factoryPost("agents/\(a.id)/team", ["team": new.isEmpty ? NSNull() : new]); await refresh() } }
-                )) {
-                    Text("Nenhuma").tag("")
-                    ForEach(state.teams) { Text($0.name).tag($0.id) }
-                }
-            }
-            if let m = a.mission { missionSection(m) }
-            Section {} footer: {
-                HStack {
-                    Spacer()
-                    Button("Apagar Agente…") {
-                        removal = Removal(path: "agents/\(a.id)", title: "Apagar \(a.name)?", message: "O agente sai da Fábrica. Esta ação não pode ser desfeita.", action: "Apagar")
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private func missionSection(_ m: MissionItem) -> some View {
-        Section {
-            LabeledContent("Objetivo") { Text(m.goal).textSelection(.enabled) }
-            ForEach(Array(stageNames.enumerated()), id: \.offset) { i, s in
-                HStack(spacing: 8) {
-                    stageIcon(i, m).frame(width: 16)
-                    Text(s).foregroundStyle(i > m.stage ? .secondary : .primary)
-                }
-                .accessibilityElement(children: .combine)
-            }
-            if m.log.last?.verdict == "sem-evidencia" {
-                Label("Parou: a etapa não citou evidência.", systemImage: "exclamationmark.triangle.fill")
-            } else if let e = m.log.last?.evidence.first {
-                LabeledContent("Evidência") { Text(e).lineLimit(3).textSelection(.enabled) }
-            }
-        } header: {
-            Text("Missão")
-        } footer: {
-            FormNote(missionName(m.status))
-        }
-    }
-
-    @ViewBuilder private func stageIcon(_ i: Int, _ m: MissionItem) -> some View {
-        if i < m.stage || (i == m.stage && m.status == "concluida") {
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityLabel("Concluída")
-        } else if i > m.stage {
-            Image(systemName: "circle").foregroundStyle(.tertiary).accessibilityLabel("Pendente")
-        } else if m.status == "rodando" {
-            ProgressView().controlSize(.small).accessibilityLabel("Em andamento")
-        } else if m.status == "aguardando" {
-            Image(systemName: "hand.raised.circle.fill").foregroundStyle(.orange).accessibilityLabel("Aguardando aprovação")
-        } else {
-            Image(systemName: "xmark.circle.fill").foregroundStyle(.red).accessibilityLabel("Interrompida")
-        }
-    }
-
-    // MARK: Equipe
-
-    private func teamPage(_ team: TeamItem) -> some View {
-        let crew = state.agents.filter { $0.team == team.id }
-        return Form {
-            Section {
-                HStack(spacing: 12) {
-                    Image(systemName: "number")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 44, height: 44)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(team.name).font(.headline).lineLimit(1)
-                        Text(crew.isEmpty ? "Sem agentes" : "\(crew.count) \(crew.count == 1 ? "agente" : "agentes")")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Abrir Canal") { openConversation(team.conversation) }
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-            Section {
-                if crew.isEmpty {
-                    Text("Escolha esta equipe na página de um agente.").foregroundStyle(.secondary)
-                }
-                ForEach(crew) { a in
-                    LabeledContent {
+    private func lane(_ a: AgentItem) -> some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 28) {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(a.name).font(.system(size: 17, weight: .semibold)).lineLimit(1)
                         Text(statusName(a.status))
-                    } label: {
-                        Label {
-                            Text(a.name)
-                        } icon: {
-                            AgentAvatar(name: a.name, size: 22)
-                        }
+                            .font(.system(size: 12, weight: a.status == "aguardando" ? .semibold : .regular))
+                            .foregroundStyle(a.status == "aguardando" ? tint : Color.secondary)
                     }
-                }
-            } header: {
-                Text("Membros")
-            } footer: {
-                FormNote("Num canal, escreva @Nome para chamar um agente. Eles também chamam uns aos outros.")
-            }
-            Section {} footer: {
-                HStack {
-                    Spacer()
-                    Button("Apagar Equipe…") {
-                        removal = Removal(path: "teams/\(team.id)", title: "Apagar a equipe \(team.name)?", message: "Os agentes continuam na Fábrica, sem equipe.", action: "Apagar")
+                    Text(a.role).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
+                    if let m = a.mission {
+                        Text(m.goal).font(.system(size: 13, weight: .medium)).lineLimit(2).padding(.top, 2)
+                        missionNote(m)
                     }
+                    HStack(spacing: 16) {
+                        Button(loc("Conversar")) { openConversation(a.conversation) }
+                        Button(loc("Nova missão")) { missionFor = a }
+                        more(a)
+                    }
+                    .buttonStyle(QuietStyle(tint: tint))
+                    .padding(.top, 5)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                ProductionLine(agent: a, tint: tint).frame(width: 330)
             }
+            .padding(.vertical, 18)
+            Rectangle().fill(Bench.line).frame(height: 1)
         }
-        .formStyle(.grouped)
+    }
+
+    @ViewBuilder private func missionNote(_ m: MissionItem) -> some View {
+        if m.log.last?.verdict == "sem-evidencia" {
+            Text(loc("Parou: a etapa não citou evidência.")).font(.system(size: 12)).foregroundStyle(.red)
+        } else if m.status != "rodando" {
+            Text(loc(missionName(m.status))).font(.system(size: 12)).foregroundStyle(.secondary)
+        }
+    }
+
+    private func more(_ a: AgentItem) -> some View {
+        Menu {
+            Section(detailLine(a)) {}
+            Picker(loc("Equipe"), selection: Binding(
+                get: { a.team ?? "" },
+                set: { new in Task { _ = await core.factoryPost("agents/\(a.id)/team", ["team": new.isEmpty ? NSNull() : new]); await refresh() } }
+            )) {
+                Text(loc("Nenhuma")).tag("")
+                ForEach(state.teams) { Text($0.name).tag($0.id) }
+            }
+            Divider()
+            Button(loc("Apagar agente…"), role: .destructive) {
+                removal = Removal(path: "agents/\(a.id)", title: loc("Apagar %@?", a.name), message: loc("O agente sai da Fábrica. Esta ação não pode ser desfeita."), action: loc("Apagar"))
+            }
+        } label: {
+            Text(loc("Mais")).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private func detailLine(_ a: AgentItem) -> String {
+        var parts = [loc(a.place == "nuvem" ? "Padrão da nuvem" : (modelInfo(a.model)?.name ?? a.model.capitalized)),
+                     loc(effortNames[a.effort] ?? a.effort),
+                     loc(a.place == "nuvem" ? "Nuvem" : "Este Mac")]
+        if let p = a.project { parts.append(p.components(separatedBy: "/").last ?? p) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func routerLine(_ r: RouterStats) -> some View {
+        Text(loc("Modelo automático: Haiku %@, Sonnet %@, Opus %@. Subiu de modelo %@ vezes e aprendeu com %@ resultados.", "\(r.haiku)", "\(r.sonnet)", "\(r.opus)", "\(r.escalations)", "\(r.learned)"))
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
     }
 
     // MARK: Folhas
@@ -491,52 +528,59 @@ struct FactoryView: View {
     }
 
     private func sheetButtons(_ action: String, enabled: Bool, cancel: @escaping () -> Void, go: @escaping () -> Void) -> some View {
-        HStack {
+        HStack(spacing: 16) {
             Spacer()
-            Button("Cancelar", action: cancel).keyboardShortcut(.cancelAction)
-            Button(action, action: go).keyboardShortcut(.defaultAction).disabled(!enabled)
+            Button(loc("Cancelar"), action: cancel).buttonStyle(QuietStyle(tint: tint)).keyboardShortcut(.cancelAction)
+            Button(loc(action), action: go).buttonStyle(SolidStyle()).keyboardShortcut(.defaultAction).disabled(!enabled)
         }
-        .padding([.horizontal, .bottom], 20)
     }
 
     private func filled(_ s: String) -> Bool { !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
+    private func sheetTitle(_ t: String) -> some View {
+        Text(t).font(Bench.display(26)).tracking(-0.6)
+    }
+
+    private func choice<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle(title)
+            content()
+        }
+    }
+
     private var agentSheet: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section {
-                    TextField("Nome", text: $name, prompt: Text("Revisora"))
-                    TextField("Papel", text: $role, prompt: Text("O que este agente faz"), axis: .vertical).lineLimit(2...5)
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                AgentAvatar(name: name.isEmpty ? "?" : name, size: 40)
+                TextField("", text: $name, prompt: Text(loc("Nome do agente")).foregroundStyle(Bench.faint))
+                    .textFieldStyle(.plain)
+                    .font(Bench.display(26))
+                    .tracking(-0.6)
+                    .accessibilityLabel(loc("Nome do agente"))
+            }
+            HairField(prompt: "O que este agente faz", text: $role, lines: 2...4)
+            choice("Modelo") {
+                WordPicker(options: modelWords, selection: $model, tint: tint)
+                Text(place == "nuvem" ? loc("Na nuvem, o modelo é o padrão do Claude na nuvem.") : loc(modelInfo(model)?.note ?? ""))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            choice("Esforço") {
+                WordPicker(options: [("auto", "Automático")] + effortLevels.map { ($0, effortNames[$0] ?? $0) }, selection: $effort, tint: tint)
+            }
+            HStack(alignment: .top, spacing: 40) {
+                choice("Onde roda") {
+                    WordPicker(options: [("mac", "Este Mac"), ("nuvem", "Nuvem")], selection: $place, tint: tint)
                 }
-                Section {
-                    Picker("Modelo", selection: $model) {
-                        ForEach(modelInfos, id: \.id) { Text($0.name).tag($0.id) }
-                    }
-                    Picker("Esforço", selection: $effort) {
-                        Text("Automático").tag("auto")
-                        ForEach(effortLevels, id: \.self) { Text(effortNames[$0] ?? $0).tag($0) }
-                    }
-                } footer: {
-                    FormNote(place == "nuvem" ? "Na nuvem, o modelo é o padrão do Claude na nuvem." : (modelInfo(model)?.note ?? ""))
-                }
-                Section {
-                    Picker("Onde Roda", selection: $place) {
-                        Text("Este Mac").tag("mac")
-                        Text("Nuvem").tag("nuvem")
-                    }
-                    Picker("Projeto", selection: $project) {
-                        Text("Nenhum").tag("")
-                        ForEach(core.usage?.projects ?? [], id: \.path) { Text($0.name).tag($0.path) }
-                    }
-                }
-                if let problem {
-                    Label(problem, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                choice("Projeto") {
+                    WordDropdown(options: [("", "Nenhum")] + (core.usage?.projects ?? []).map { ($0.path, $0.name) }, selection: $project, tint: tint)
                 }
             }
-            .formStyle(.grouped)
-            sheetButtons("Criar Agente", enabled: filled(name) && filled(role), cancel: { creatingAgent = false }, go: createAgent)
+            if let problem { Text(problem).font(.system(size: 12)).foregroundStyle(.red) }
+            sheetButtons("Criar agente", enabled: filled(name) && filled(role), cancel: { creatingAgent = false }, go: createAgent)
         }
-        .frame(width: 460, height: 440)
+        .padding(28)
+        .frame(width: 500)
+        .background(Bench.canvas)
     }
 
     private func createAgent() {
@@ -549,12 +593,10 @@ struct FactoryView: View {
     }
 
     private var teamSheet: some View {
-        VStack(spacing: 0) {
-            Form {
-                TextField("Nome", text: $teamName, prompt: Text("Produto"))
-            }
-            .formStyle(.grouped)
-            sheetButtons("Criar Equipe", enabled: filled(teamName), cancel: {
+        VStack(alignment: .leading, spacing: 20) {
+            sheetTitle(loc("Nova equipe"))
+            HairField(prompt: "Nome da equipe", text: $teamName)
+            sheetButtons("Criar equipe", enabled: filled(teamName), cancel: {
                 teamName = ""
                 creatingTeam = false
             }, go: {
@@ -564,21 +606,20 @@ struct FactoryView: View {
                 Task { problem = await core.factoryPost("teams", ["name": n, "members": []]); await refresh() }
             })
         }
-        .frame(width: 380, height: 150)
+        .padding(28)
+        .frame(width: 400)
+        .background(Bench.canvas)
     }
 
     private func missionSheet(_ agent: AgentItem) -> some View {
-        VStack(spacing: 0) {
-            Form {
-                Section {
-                    TextField("Objetivo", text: $goal, axis: .vertical).lineLimit(3...6)
-                } header: {
-                    Text("Missão para \(agent.name)")
-                } footer: {
-                    FormNote("Investigar, Propor, Executar (com sua aprovação) e Verificar. Cada etapa precisa citar evidência.")
-                }
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                AgentAvatar(name: agent.name, size: 40)
+                sheetTitle(loc("Missão para %@", agent.name))
             }
-            .formStyle(.grouped)
+            HairField(prompt: "Objetivo", text: $goal, lines: 3...6)
+            Text(loc("Investigar, Propor, Executar (com sua aprovação) e Verificar. Cada etapa precisa citar evidência."))
+                .font(.system(size: 12)).foregroundStyle(.secondary)
             sheetButtons("Iniciar", enabled: filled(goal), cancel: { missionFor = nil }, go: {
                 let g = goal
                 goal = ""
@@ -586,22 +627,20 @@ struct FactoryView: View {
                 Task { problem = await core.factoryPost("agents/\(agent.id)/missions", ["goal": g]); await refresh() }
             })
         }
-        .frame(width: 440, height: 260)
+        .padding(28)
+        .frame(width: 460)
+        .background(Bench.canvas)
     }
 
     private func remove(_ r: Removal) {
-        pick = .overview
         Task {
             await core.factoryDelete(r.path)
             await refresh()
         }
     }
 
-    /// Só para teste visual: abre direto a página de um agente ou equipe.
+    /// Só para teste visual: abre a folha de novo agente.
     private func testPick() {
-        guard pick == .overview else { return }
-        if CommandLine.arguments.contains("--fabrica=agente"), let a = state.agents.first { pick = .agent(a.id) }
-        if CommandLine.arguments.contains("--fabrica=equipe"), let t = state.teams.first { pick = .team(t.id) }
         if CommandLine.arguments.contains("--fabrica=novo"), !creatingAgent { startAgent() }
     }
 
@@ -615,6 +654,6 @@ struct FactoryView: View {
     }
 
     private func statusName(_ s: String?) -> String {
-        ["trabalhando": "Trabalhando", "aguardando": "Aguardando você", "erro": "Com erro"][s ?? ""] ?? "Livre"
+        loc(["trabalhando": "Trabalhando", "aguardando": "Aguardando você", "erro": "Com erro"][s ?? ""] ?? "Livre")
     }
 }

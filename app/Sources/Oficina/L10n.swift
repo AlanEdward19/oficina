@@ -37,3 +37,10 @@ func tr(_ key: String) -> String {
 }
 
 func tr(_ key: String, _ arg: String) -> String { tr(key).replacingOccurrences(of: "%@", with: arg) }
+
+/// Texto dinâmico das telas SwiftUI. Os literais de `Text`, `Button` etc. já
+/// são traduzidos sozinhos pelo `Localizable.strings`.
+func loc(_ key: String, _ args: String...) -> String {
+    let text = Bundle.main.localizedString(forKey: key, value: key, table: nil)
+    return args.isEmpty ? text : String(format: text, arguments: args)
+}

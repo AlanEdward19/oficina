@@ -434,9 +434,6 @@ func parsePorts(_ output: String) -> [PortEntry] {
 
 // MARK: Painel da barra de menus
 
-private let hoverFill = Color.primary.opacity(0.08)
-private let groupFill = Color.primary.opacity(0.05)
-
 /// Velocidade curta: a coluna da rede não comporta "bytes/s".
 private func rateText(_ n: UInt64) -> String {
     let f = ByteCountFormatter()
@@ -450,92 +447,61 @@ private func memoryText(_ n: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(min(n, UInt64(Int64.max))), countStyle: .memory)
 }
 
-/// Símbolo em círculo neutro, como nos menus de Wi-Fi e Bluetooth.
-private struct RoundIcon: View {
-    let name: String
-    var side: CGFloat = 26
-    var lit = false
-
-    var body: some View {
-        Image(systemName: name)
-            .font(.system(size: side * 0.46, weight: .medium))
-            .foregroundStyle(.primary)
-            .frame(width: side, height: side)
-            .background(Color.primary.opacity(lit ? 0.18 : 0.1), in: Circle())
-            .accessibilityHidden(true)
-    }
-}
-
 /// Ícone da navegação do painel.
 private struct TabIcon: View {
     let title: String
     let icon: String
     let on: Bool
+    var tint: Color
     let action: () -> Void
     @State private var hover = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 13))
-                .foregroundStyle(on ? Color.accentColor : hover ? Color.primary : Color.secondary)
-                .frame(width: 26, height: 24)
-                .background(on ? Color.accentColor.opacity(0.16) : hover ? hoverFill : .clear, in: RoundedRectangle(cornerRadius: 6))
-                .contentShape(Rectangle())
+            VStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 13))
+                    .foregroundStyle(on ? Color.primary : hover ? Color.primary : Bench.faint)
+                    .frame(width: 26, height: 18)
+                Rectangle().fill(on ? tint : .clear).frame(width: 16, height: 2)
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(title)
-        .accessibilityLabel(title)
+        .help(loc(title))
+        .accessibilityLabel(loc(title))
         .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 
-/// Atalho em grade, no jeito da Central de Controle.
+/// Atalho em grade: o símbolo e o nome, sem caixa.
 private struct ActionTile: View {
     let title: String
     let icon: String
+    var tint: Color
     let action: () -> Void
     @State private var hover = false
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 5) {
-                RoundIcon(name: icon, side: 34, lit: hover)
-                Text(title).font(.caption).lineLimit(1).minimumScaleFactor(0.85)
+            VStack(spacing: 7) {
+                Image(systemName: icon).font(.system(size: 19, weight: .light)).frame(height: 24).accessibilityHidden(true)
+                Text(loc(title)).font(.system(size: 11)).lineLimit(1).minimumScaleFactor(0.85)
             }
+            .foregroundStyle(hover ? tint : Color.primary)
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(title)
-    }
-}
-
-/// Linha com realce de menu; o controle da direita só aparece no hover.
-private struct HoverRow<Content: View, Trailing: View>: View {
-    var keepTrailing = false
-    @ViewBuilder let content: () -> Content
-    @ViewBuilder let trailing: () -> Trailing
-    @State private var hover = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            content()
-            Spacer(minLength: 4)
-            trailing().opacity(hover || keepTrailing ? 1 : 0)
-        }
-        .padding(.horizontal, 8)
-        .frame(minHeight: 30)
-        .background(hover ? hoverFill : .clear, in: RoundedRectangle(cornerRadius: 6))
-        .contentShape(Rectangle())
-        .onHover { hover = $0 }
+        .help(loc(title))
     }
 }
 
 struct MenuBarPanel: View {
     @ObservedObject var tools: Tools
+    var tint: Color
     let openCleaner: () -> Void
     let close: () -> Void
     @StateObject private var probe = SystemProbe()
@@ -559,56 +525,59 @@ struct MenuBarPanel: View {
         VStack(spacing: 0) {
             header
             page.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            Divider().padding(.horizontal, 12)
+            Rectangle().fill(Bench.line).frame(height: 1).padding(.horizontal, 18)
             footer
         }
-        .frame(width: 340, height: 420)
+        .padding(.top, 13)
+        .frame(width: 340, height: 482)
+        .background(Bench.canvas.padding(-40))
         .onChange(of: tools.tab) { enter() }
         .onAppear(perform: enter)
         .onDisappear { probe.stop() }
     }
 
     private var header: some View {
-        HStack(spacing: 2) {
-            Text(tabs.first { $0.id == tools.tab }?.title ?? "").font(.headline).lineLimit(1)
-            Spacer(minLength: 8)
-            ForEach(tabs, id: \.id) { t in
-                TabIcon(title: t.title, icon: t.icon, on: tools.tab == t.id) { tools.tab = t.id }
+        VStack(alignment: .leading, spacing: 8) {
+            Text(loc(tabs.first { $0.id == tools.tab }?.title ?? "")).font(Bench.display(26)).tracking(-0.6).lineLimit(1)
+            HStack(spacing: 18) {
+                ForEach(tabs, id: \.id) { t in
+                    TabIcon(title: t.title, icon: t.icon, on: tools.tab == t.id, tint: tint) { tools.tab = t.id }
+                }
             }
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 18)
         .padding(.top, 12)
-        .padding(.bottom, 8)
+        .padding(.bottom, 12)
     }
 
     private var footer: some View {
         HStack(spacing: 8) {
-            Button {
+            Button(loc("Limpeza do Disco…")) {
                 close()
                 openCleaner()
-            } label: {
-                Label("Limpeza do Disco…", systemImage: "internaldrive")
             }
             Spacer(minLength: 4)
             if let t = tools.toast {
-                Text(t).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(t).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
             } else if tools.tab == "apps" {
-                Menu("Encerrar Vários") {
-                    Button("Todos Menos o da Frente") {
+                Menu {
+                    Button(loc("Todos Menos o da Frente")) {
                         let front = NSWorkspace.shared.frontmostApplication
                         running.filter { $0 != front }.forEach { $0.terminate() }
                         refreshAppsSoon()
                     }
-                    Button("Todos") { running.forEach { $0.terminate() }; refreshAppsSoon() }
+                    Button(loc("Todos")) { running.forEach { $0.terminate() }; refreshAppsSoon() }
+                } label: {
+                    Text(loc("Encerrar Vários")).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
                 }
                 .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .fixedSize()
             }
         }
-        .buttonStyle(.borderless)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 16)
+        .buttonStyle(QuietStyle(tint: tint))
+        .padding(.horizontal, 18)
         .frame(height: 38)
     }
 
@@ -630,76 +599,50 @@ struct MenuBarPanel: View {
         }
     }
 
-    private func group<C: View>(@ViewBuilder _ content: () -> C) -> some View {
-        VStack(spacing: 0) { content() }
-            .background(groupFill, in: RoundedRectangle(cornerRadius: 10))
-            .padding(.horizontal, 12)
-    }
-
     private func emptyNote(_ t: String) -> some View {
-        Text(t).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+        Text(loc(t)).font(.system(size: 13)).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: Sistema
 
     private var system: some View {
         let n = probe.now
-        return group {
-            meter("cpu", "CPU", "\(Int(n.cpu * 100))%", n.cpu)
-            meter("memorychip", "Memória", "\(memoryText(n.memoryUsed)) de \(memoryText(n.memoryTotal))", Double(n.memoryUsed) / Double(max(n.memoryTotal, 1)))
-            meter("internaldrive", "Disco", "\(bytesText(UInt64(max(n.diskFree, 0)))) livres", 1 - Double(n.diskFree) / Double(max(n.diskTotal, 1)))
+        return VStack(spacing: 20) {
+            meter("CPU", "\(Int(n.cpu * 100))%", n.cpu)
+            meter("Memória", "\(memoryText(n.memoryUsed)) / \(memoryText(n.memoryTotal))", Double(n.memoryUsed) / Double(max(n.memoryTotal, 1)))
+            meter("Disco", loc("%@ livres", bytesText(UInt64(max(n.diskFree, 0)))), 1 - Double(n.diskFree) / Double(max(n.diskTotal, 1)))
             if let b = n.battery {
-                meter(batteryIcon(b, charging: n.charging), n.charging ? "Bateria, Carregando" : "Bateria", "\(b)%", Double(b) / 100, warnHigh: false)
+                meter(n.charging ? "Bateria, Carregando" : "Bateria", "\(b)%", Double(b) / 100, warnHigh: false)
             }
-            HStack(spacing: 10) {
-                RoundIcon(name: "arrow.up.arrow.down")
-                Text("Rede")
+            HStack(alignment: .firstTextBaseline) {
+                Text(loc("Rede")).font(.system(size: 13)).foregroundStyle(.secondary)
                 Spacer()
-                Text("↓ \(rateText(n.down))  ↑ \(rateText(n.up))").font(.callout).monospacedDigit().foregroundStyle(.secondary)
-            }
-            .padding(10)
-        }
-        .padding(.top, 2)
-    }
-
-    private func batteryIcon(_ level: Int, charging: Bool) -> String {
-        if charging { return "battery.100.bolt" }
-        switch level {
-        case 88...: return "battery.100"
-        case 63...: return "battery.75"
-        case 38...: return "battery.50"
-        case 13...: return "battery.25"
-        default: return "battery.0"
-        }
-    }
-
-    private func meter(_ icon: String, _ title: String, _ value: String, _ part: Double, warnHigh: Bool = true) -> some View {
-        let level = min(max(part, 0), 1)
-        return HStack(spacing: 10) {
-            RoundIcon(name: icon)
-            VStack(spacing: 5) {
-                HStack {
-                    Text(title)
-                    Spacer()
-                    Text(value).font(.callout).monospacedDigit().foregroundStyle(.secondary)
-                }
-                Gauge(value: level) { EmptyView() }
-                    .gaugeStyle(.accessoryLinearCapacity)
-                    .tint(warnHigh && level >= 0.9 ? Color.orange : Color.accentColor)
-                    .labelsHidden()
+                Text("↓ \(rateText(n.down))  ↑ \(rateText(n.up))").font(.system(size: 15, weight: .semibold)).monospacedDigit()
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 18)
+        .padding(.top, 6)
+    }
+
+    private func meter(_ title: String, _ value: String, _ part: Double, warnHigh: Bool = true) -> some View {
+        VStack(spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(loc(title)).font(.system(size: 13)).foregroundStyle(.secondary)
+                Spacer()
+                Text(value).font(.system(size: 15, weight: .semibold)).monospacedDigit()
+            }
+            LevelLine(part: part, tint: warnHigh && part >= 0.9 ? .red : tint)
+        }
         .accessibilityElement(children: .combine)
     }
 
     // MARK: Controles
 
-    private var awakeChoice: Binding<Int> {
+    private var awakeChoice: Binding<String> {
         Binding(
-            get: { tools.awake ? (tools.awakeUntil == nil ? -1 : tools.awakeChoice) : 0 },
-            set: { v in
+            get: { String(tools.awake ? (tools.awakeUntil == nil ? -1 : tools.awakeChoice) : 0) },
+            set: { raw in
+                let v = Int(raw) ?? 0
                 tools.awakeChoice = v
                 if v == 0 { tools.stopAwake() } else { tools.keepAwake(minutes: v < 0 ? nil : v) }
             }
@@ -707,53 +650,41 @@ struct MenuBarPanel: View {
     }
 
     private func switchRow(_ title: String, note: String? = nil, _ on: Binding<Bool>) -> some View {
-        HStack(spacing: 6) {
-            Text(title).lineLimit(1)
-            if let note { Text(note).font(.callout).foregroundStyle(.tertiary) }
-            Spacer(minLength: 4)
-            Toggle(title, isOn: on).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+        Toggle(isOn: on) {
+            HStack(spacing: 6) {
+                Text(loc(title)).font(.system(size: 13)).lineLimit(1)
+                if let note { Text(note).font(.system(size: 12)).foregroundStyle(Bench.faint) }
+            }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 32)
+        .toggleStyle(RowSwitch(tint: tint))
+        .frame(height: 28)
     }
 
     private var controls: some View {
-        VStack(spacing: 14) {
-            group {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(spacing: 0) {
                 switchRow("Histórico de Cópias", Binding(get: { tools.clipboardOn }, set: { tools.clipboardOn = $0 }))
                 switchRow("Encaixar Janelas", note: "⌃⌥ e Setas", Binding(get: { tools.snapOn }, set: { tools.snapOn = $0 }))
                 switchRow("Clique na Dock Oculta o App", $dockClickHide)
-                HStack {
-                    Text("Manter Acordado")
-                    Spacer(minLength: 4)
-                    Picker("Manter Acordado", selection: awakeChoice) {
-                        Text("Desligado").tag(0)
-                        Text("30 Minutos").tag(30)
-                        Text("1 Hora").tag(60)
-                        Text("3 Horas").tag(180)
-                        Text("Até Desligar").tag(-1)
-                    }
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .fixedSize()
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 32)
             }
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 3), spacing: 12) {
-                ActionTile(title: "Ler Texto", icon: "text.viewfinder") { act(tools.recognizeScreen) }
-                ActionTile(title: "Capturar", icon: "camera.viewfinder") { act(tools.screenshotToClipboard) }
-                ActionTile(title: "Conta-gotas", icon: "eyedropper") { act(tools.pickColor) }
-                ActionTile(title: "Limpar Link", icon: "link") { tools.cleanClipboardURL() }
-                ActionTile(title: "Sem Formatação", icon: "textformat") { tools.plainClipboard() }
-                ActionTile(title: "Modo Escuro", icon: "circle.lefthalf.filled") { tools.toggleDarkMode() }
-                ActionTile(title: tools.desktopHidden ? "Mostrar Mesa" : "Ocultar Mesa", icon: "menubar.dock.rectangle") { tools.toggleDesktopIcons() }
-                ActionTile(title: "Apagar Tela", icon: "moon") { act(tools.screenOff) }
-                ActionTile(title: "Ejetar Discos", icon: "eject") { tools.ejectDisks() }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(loc("Manter Acordado")).font(.system(size: 13))
+                WordPicker(options: [("0", "Desligado"), ("30", "30 min"), ("60", "1 h"), ("180", "3 h"), ("-1", "Sempre")], selection: awakeChoice, tint: tint)
             }
-            .padding(.horizontal, 12)
+            Rectangle().fill(Bench.line).frame(height: 1)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 3), spacing: 13) {
+                ActionTile(title: "Ler Texto", icon: "text.viewfinder", tint: tint) { act(tools.recognizeScreen) }
+                ActionTile(title: "Capturar", icon: "camera.viewfinder", tint: tint) { act(tools.screenshotToClipboard) }
+                ActionTile(title: "Conta-gotas", icon: "eyedropper", tint: tint) { act(tools.pickColor) }
+                ActionTile(title: "Limpar Link", icon: "link", tint: tint) { tools.cleanClipboardURL() }
+                ActionTile(title: "Sem Formatação", icon: "textformat", tint: tint) { tools.plainClipboard() }
+                ActionTile(title: "Modo Escuro", icon: "circle.lefthalf.filled", tint: tint) { tools.toggleDarkMode() }
+                ActionTile(title: tools.desktopHidden ? "Mostrar Mesa" : "Ocultar Mesa", icon: "menubar.dock.rectangle", tint: tint) { tools.toggleDesktopIcons() }
+                ActionTile(title: "Apagar Tela", icon: "moon", tint: tint) { act(tools.screenOff) }
+                ActionTile(title: "Ejetar Discos", icon: "eject", tint: tint) { tools.ejectDisks() }
+            }
         }
-        .padding(.top, 2)
+        .padding(.horizontal, 18)
     }
 
     /// O que usa a tela inteira precisa do painel fora do caminho.
@@ -766,16 +697,16 @@ struct MenuBarPanel: View {
 
     private var scratch: some View {
         ZStack(alignment: .topLeading) {
-            TextEditor(text: $notes).font(.body).scrollContentBackground(.hidden)
+            TextEditor(text: $notes).font(.system(size: 14)).scrollContentBackground(.hidden)
             if notes.isEmpty {
-                Text("Escreva o que quiser guardar aqui.")
-                    .foregroundStyle(.tertiary)
+                Text(loc("Escreva o que quiser guardar aqui."))
+                    .font(.system(size: 14))
+                    .foregroundStyle(Bench.faint)
                     .padding(.leading, 5)
                     .allowsHitTesting(false)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 2)
+        .padding(.horizontal, 14)
         .padding(.bottom, 8)
     }
 
@@ -783,54 +714,47 @@ struct MenuBarPanel: View {
 
     @ViewBuilder private var clipboard: some View {
         if !tools.clipboardOn {
-            ContentUnavailableView {
-                Label("Histórico Desligado", systemImage: "doc.on.clipboard")
-            } description: {
-                Text("Guarda textos copiados só neste Mac e ignora o que gerenciadores de senha marcam.")
-            } actions: {
-                Button("Ligar") { tools.clipboardOn = true }
+            VStack(alignment: .leading, spacing: 14) {
+                Text(loc("Guarda textos copiados só neste Mac e ignora o que gerenciadores de senha marcam."))
+                    .font(.system(size: 14)).foregroundStyle(.secondary)
+                Button(loc("Ligar histórico")) { tools.clipboardOn = true }.buttonStyle(SolidStyle())
             }
+            .padding(.horizontal, 18)
+            .padding(.top, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             let shown = tools.clips.filter { search.isEmpty || $0.text.localizedCaseInsensitiveContains(search) }.sorted { $0.pinned && !$1.pinned }
-            VStack(spacing: 6) {
-                HStack(spacing: 5) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
-                    TextField("Buscar", text: $search).textFieldStyle(.plain)
-                }
-                .padding(.horizontal, 8)
-                .frame(height: 26)
-                .background(groupFill, in: RoundedRectangle(cornerRadius: 7))
-                .padding(.horizontal, 12)
+            VStack(spacing: 8) {
+                HairField(prompt: "Buscar", text: $search).padding(.horizontal, 18)
                 if shown.isEmpty {
                     emptyNote(search.isEmpty ? "Nada copiado ainda" : "Nada encontrado")
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 0) { ForEach(shown) { clipRow($0) } }
-                            .padding(.horizontal, 8)
+                            .padding(.horizontal, 10)
                     }
                 }
             }
-            .padding(.top, 2)
         }
     }
 
     private func clipRow(_ e: ClipEntry) -> some View {
         HoverRow(keepTrailing: e.pinned) {
-            Text(e.text).lineLimit(2).font(.callout).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5)
+            Text(e.text).lineLimit(2).font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5)
         } trailing: {
             Button {
                 tools.togglePin(e)
             } label: {
-                Image(systemName: e.pinned ? "pin.fill" : "pin").foregroundStyle(.secondary)
+                Image(systemName: e.pinned ? "pin.fill" : "pin")
             }
-            .buttonStyle(.borderless)
-            .help(e.pinned ? "Desafixar" : "Fixar")
-            .accessibilityLabel(e.pinned ? "Desafixar" : "Fixar")
+            .buttonStyle(QuietStyle(tint: tint))
+            .help(loc(e.pinned ? "Desafixar" : "Fixar"))
+            .accessibilityLabel(loc(e.pinned ? "Desafixar" : "Fixar"))
         }
         .onTapGesture { tools.copy(e.text) }
         .contextMenu {
-            Button(e.pinned ? "Desafixar" : "Fixar") { tools.togglePin(e) }
-            Button("Apagar", role: .destructive) { tools.removeClip(e) }
+            Button(loc(e.pinned ? "Desafixar" : "Fixar")) { tools.togglePin(e) }
+            Button(loc("Apagar"), role: .destructive) { tools.removeClip(e) }
         }
     }
 
@@ -848,13 +772,13 @@ struct MenuBarPanel: View {
                 ForEach(running, id: \.processIdentifier) { a in
                     HoverRow {
                         if let i = a.icon { Image(nsImage: i).resizable().frame(width: 22, height: 22).accessibilityHidden(true) }
-                        Text(a.localizedName ?? "App").lineLimit(1)
+                        Text(a.localizedName ?? "App").font(.system(size: 13)).lineLimit(1)
                     } trailing: {
-                        Button("Encerrar") { a.terminate(); refreshAppsSoon() }.controlSize(.small).buttonStyle(.bordered)
+                        Button(loc("Encerrar")) { a.terminate(); refreshAppsSoon() }.buttonStyle(QuietStyle(tint: .red))
                     }
                 }
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 10)
         }
     }
 
@@ -880,31 +804,42 @@ struct MenuBarPanel: View {
         } else {
             ScrollView {
                 LazyVStack(spacing: 0) { ForEach(ports) { portRow($0) } }
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, 10)
             }
         }
     }
 
     private func portRow(_ p: PortEntry) -> some View {
         HoverRow(keepTrailing: confirming == p.id) {
-            Text(p.port).font(.body.weight(.medium)).monospacedDigit().frame(width: 52, alignment: .leading)
-            Text(p.command).foregroundStyle(.secondary).lineLimit(1)
+            Text(p.port).font(.system(size: 14, weight: .semibold)).monospacedDigit().frame(width: 56, alignment: .leading)
+            Text(p.command).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
         } trailing: {
-            HStack(spacing: 4) {
+            HStack(spacing: 12) {
                 if confirming == p.id {
-                    Button("Cancelar") { confirming = nil }
-                    Button("Encerrar", role: .destructive) {
+                    Button(loc("Cancelar")) { confirming = nil }.buttonStyle(QuietStyle(tint: tint))
+                    Button(loc("Encerrar")) {
                         kill(p.pid, SIGTERM)
                         confirming = nil
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { loadPorts() }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                    .buttonStyle(QuietStyle(tint: .red))
                 } else {
-                    Button("Encerrar…") { confirming = p.id }
+                    Button(loc("Encerrar…")) { confirming = p.id }.buttonStyle(QuietStyle(tint: .red))
                 }
             }
-            .controlSize(.small)
+        }
+    }
+}
+
+/// Linha inteira: o rótulo à esquerda e a chave à direita.
+private struct RowSwitch: ToggleStyle {
+    var tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        HStack {
+            configuration.label
+            Spacer(minLength: 4)
+            Toggle("", isOn: configuration.$isOn).labelsHidden().toggleStyle(BenchSwitch(tint: tint))
         }
     }
 }

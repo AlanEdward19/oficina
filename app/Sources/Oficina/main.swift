@@ -99,13 +99,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         watchPresence()
         core.start()
         if CommandLine.arguments.contains("--abrir-mente") { openMind() }
-        if CommandLine.arguments.contains("--abrir-fabrica") { openFactory() }
+        if CommandLine.arguments.contains("--abrir-fabrica") {
+            // Só para teste visual: abre como no uso normal, com o app já iniciado.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.openFactory() }
+        }
         if CommandLine.arguments.contains("--abrir-limpeza") { openCleaner() }
         if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--abrir-barra") }) {
             if let tab = arg.split(separator: "=").dropFirst().first { tools.tab = String(tab) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showBarPanel() }
         }
-        if CommandLine.arguments.contains("--abrir-personalizar") { openPersonalize() }
+        if CommandLine.arguments.contains("--abrir-personalizar") {
+            // Só para teste visual: espera os ajustes chegarem do core.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.openPersonalize() }
+        }
         if CommandLine.arguments.contains("--dormir") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
                 self?.pet.comeOut { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.pet.putToBed() } }
@@ -278,22 +284,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         p.makeKeyAndOrderFront(nil)
     }
 
-    /// Janela comum do macOS: existe só enquanto está aberta.
-    private func openTool<V: View>(_ key: String, size: NSSize, toolbar: Bool = true, _ view: V) {
+    /// Janela da Oficina: desenha até a borda e existe só enquanto está aberta.
+    private func openTool<V: View>(_ key: String, title: String, size: NSSize, _ view: V) {
         NSApp.activate(ignoringOtherApps: true)
         if let w = toolWindows[key] {
             w.makeKeyAndOrderFront(nil)
             return
         }
-        let host = NSHostingController(rootView: view)
-        host.sceneBridgingOptions = [.toolbars, .title]
-        let w = NSWindow(contentViewController: host)
-        w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        if toolbar {
-            w.styleMask.insert(.fullSizeContentView)
-            w.toolbarStyle = .unified
-            w.toolbar = NSToolbar()
-        }
+        let w = NSWindow(contentViewController: NSHostingController(rootView: view))
+        w.title = loc(title)
+        w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        w.titlebarAppearsTransparent = true
+        w.titleVisibility = .hidden
+        w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
         w.setContentSize(size)
         w.center()
@@ -307,18 +310,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     @objc private func openPersonalize() {
-        openTool("personalizar", size: NSSize(width: 500, height: 760), toolbar: false, PersonalizeView(core: core))
+        openTool("personalizar", title: "Personalizar", size: NSSize(width: 880, height: 640), PersonalizeView(core: core))
     }
 
     @objc private func openFactory() {
-        openTool("fabrica", size: NSSize(width: 820, height: 580), FactoryView(core: core) { [weak self] conv in
+        openTool("fabrica", title: "Fábrica", size: NSSize(width: 920, height: 640), FactoryView(core: core) { [weak self] conv in
             self?.core.select(conv)
             self?.openChat()
         })
     }
 
     @objc private func openCleaner() {
-        openTool("limpeza", size: NSSize(width: 860, height: 600), CleanView(core: core))
+        openTool("limpeza", title: "Limpeza do Disco", size: NSSize(width: 860, height: 600), CleanView(core: core))
     }
 
     @objc private func openTools() { showBarPanel() }
@@ -408,7 +411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard panel.contentView == nil || !(panel.contentView is NSHostingView<ChatView>) else { return }
         let host = NSHostingView(rootView: ChatView(core: core) { [weak self] in self?.hidePanel() })
         host.wantsLayer = true
-        host.layer?.cornerRadius = 16
+        host.layer?.cornerRadius = 14
         host.layer?.masksToBounds = true
         panel.contentView = host
     }
@@ -503,7 +506,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let p = NSPopover()
         p.behavior = .transient
         p.delegate = self
-        p.contentViewController = NSHostingController(rootView: MenuBarPanel(tools: tools, openCleaner: { [weak self] in self?.openCleaner() }, close: { [weak self] in self?.popover?.performClose(nil) }))
+        p.hasFullSizeContent = true
+        p.contentViewController = NSHostingController(rootView: MenuBarPanel(tools: tools, tint: colorFromHex(core.settings.body_color), openCleaner: { [weak self] in self?.openCleaner() }, close: { [weak self] in self?.popover?.performClose(nil) }))
         popover = p
         NSApp.activate(ignoringOtherApps: true)
         p.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
