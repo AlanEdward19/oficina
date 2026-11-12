@@ -68,7 +68,9 @@ a posse fala, anda e escuta; os outros mostram que ela saiu ("Fui à sala chamar
 **Ocupada em outro lugar.** Se ela está conversando por voz com alguém na sala e você a chama no Mac, ela **pesa a
 importância da conversa** (alguém pediu algo que ela está fazendo? está no meio de uma explicação? é papo?) contra a
 do seu chamado, e escolhe uma das saídas abaixo. **Você sempre pode forçar**: "vem agora", "urgente" ou o botão
-"Chamar já" fazem ela se despedir educadamente e vir na hora, seja qual for a conversa.
+"Chamar já" fazem ela se despedir e vir na hora, seja qual for a conversa. O jeito da despedida (e de todas as
+falas com outras pessoas) segue a personalidade escolhida em Personalizar: carinhosa, engraçada, séria, mentora ou a
+que você escrever.
 
 | Situação | O que ela faz |
 |---|---|
