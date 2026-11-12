@@ -934,9 +934,22 @@ final class PetController {
     }
     private var lastSaid = Date.distantPast
 
+    /// Presença única: com ela em outro dispositivo, some daqui.
+    private(set) var away = false
+
+    func setAway(_ on: Bool) {
+        guard on != away else { return }
+        away = on
+        window.ignoresMouseEvents = on
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.6
+            stage.animator().alphaValue = on ? 0 : 1
+        }
+    }
+
     /// Pensamento em voz alta, de vez em quando. Escondida em casa, fica quieta.
     func say(_ text: String, force: Bool = false) {
-        guard !hiddenAtHome, !busy(), !resting else { return }
+        guard !away, !hiddenAtHome, !busy(), !resting else { return }
         guard force || Date().timeIntervalSince(lastSaid) > 90 else { return }
         lastSaid = Date()
         figure.say(text, left: screen.minX - origin.x, right: screen.maxX - origin.x)

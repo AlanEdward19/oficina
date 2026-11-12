@@ -48,7 +48,7 @@ O desenho do Orca casa com o que a Oficina já tem (core separado da UI por HTTP
 - **Ela vai aonde você está**: a máquina com você na frente mostra o pet; as outras ficam quietas e trabalhando.
 - **Missões migram**: começa no Mac, continua num servidor com GPU ou na nuvem, e o resultado volta.
 
-## 3. Uma Faísca só, que se move (P1)
+## 3. Uma Faísca só, que se move (implementado com a caixa de som)
 
 A regra: **existe uma Faísca**. Ela pode estar no Mac, no Windows, numa caixa de som da sala ou no celular, mas em
 um lugar de cada vez. Agentes da Fábrica são outra coisa: podem ser muitos e estar em vários lugares, cada um

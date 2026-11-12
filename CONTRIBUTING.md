@@ -44,6 +44,7 @@ CI runs the first three on every pull request. The end-to-end script uses a fake
 | Text in the Mac's language | `app/Sources/Oficina/L10n.swift` |
 | Work context (project, git, PR) and the day's diary | `core/src/mind/context.rs`; collected in `core/src/engine.rs` (`refresh_context`) |
 | Call detection | `app/Sources/Oficina/Call.swift` (`CallWatcher.known`) |
+| One Faísca across devices | `core/src/presence.rs`, `core/src/body.rs`, `app/Sources/Oficina/Devices.swift`; speaker in `devices/caixa/` |
 | Calendar (opt-in) | `app/Sources/Oficina/Agenda.swift`; reminders in `core/src/mind/mod.rs` |
 | Listening and transcription | `app/Sources/Oficina/Listen.swift`; meetings in `core/src/meeting.rs` and `app/Sources/Oficina/Meetings.swift` |
 | Hardware workshop | `core/src/hardware/` (`sim.rs` for simulations, `oficina_cad.py` for the CAD helper) and `app/Sources/Oficina/Hardware.swift` |

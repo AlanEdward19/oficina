@@ -93,6 +93,8 @@ private struct CoreEvent: Decodable {
     let text: String?
     let usage: UsageData?
     let mind: MindBrief?
+    let presence: PresenceData?
+    let voice: VoiceJobData?
 }
 
 /// Fala com o `oficinad` e guarda o estado que as telas mostram.
@@ -116,6 +118,10 @@ final class Core: ObservableObject {
         return (history.filter { !ids.contains($0.id) } + live).sorted { $0.createdAt < $1.createdAt }
     }
     @Published private(set) var mind: MindBrief?
+    /// Onde a Faísca está agora (uma só, em um lugar de cada vez).
+    @Published private(set) var presence: PresenceData?
+    /// Pedidos de voz para os dispositivos: o Mac sintetiza e transcreve.
+    var onVoice: (VoiceJobData) -> Void = { _ in }
     @Published private(set) var connected = false
     @Published private(set) var problem: String?
 
@@ -153,6 +159,7 @@ final class Core: ObservableObject {
                 loadConversations()
                 loadSettings()
                 _ = await loadFactory()
+                presence = await get("presence")
                 if let s = await mindSnapshot() {
                     mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit, decor: s.decor, call: s.context?.call)
                 }
@@ -253,6 +260,10 @@ final class Core: ObservableObject {
             if let u = ev.usage { usage = u }
         case "mind":
             if let m = ev.mind { mind = m }
+        case "presence":
+            if let p = ev.presence { presence = p }
+        case "voice":
+            if let v = ev.voice { onVoice(v) }
         case "delta":
             guard let id = ev.id, let text = ev.text,
                   let i = tasks.firstIndex(where: { $0.id == id }) else { return }
@@ -465,6 +476,49 @@ final class Core: ObservableObject {
     /// "Nunca no Zoom": recusa e não pergunta mais nesse app.
     func never(_ id: String) {
         Task { _ = await post("mind/initiatives/\(id)/never") }
+    }
+
+    // MARK: Presença e dispositivos
+
+    /// Você chamou: ela pesa a conversa de lá; `force` sempre traz.
+    func callPresence(force: Bool) async -> CallResult? {
+        let data = await post("presence/call", json: ["force": force])
+        return data.flatMap { try? JSONDecoder().decode(CallResult.self, from: $0) }
+    }
+
+    /// Leva a Faísca até um dispositivo ("casa" é o Mac).
+    func movePresence(to: String, text: String = "") async -> String? {
+        await factoryPost("presence/move", ["to": to, "text": text])
+    }
+
+    func startPairing() async -> PairingData? {
+        let data = await post("bodies/pairing")
+        return data.flatMap { try? JSONDecoder().decode(PairingData.self, from: $0) }
+    }
+
+    func setDeviceNetwork(_ on: Bool) async -> String? {
+        await factoryPost("bodies/network", ["on": on])
+    }
+
+    func forgetDevice(_ id: String) async {
+        await factoryDelete("bodies/\(id)")
+    }
+
+    func voiceClip(_ id: String) async -> Data? {
+        guard let (data, resp) = try? await session.data(for: request("voice/\(id)")),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return data
+    }
+
+    func uploadVoice(_ id: String, wav: Data) async {
+        var req = request("voice/\(id)", method: "POST")
+        req.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
+        req.httpBody = wav
+        _ = try? await session.data(for: req)
+    }
+
+    func voiceText(_ id: String, _ text: String) async {
+        _ = await post("voice/\(id)/text", json: ["text": text])
     }
 
     // MARK: Reuniões

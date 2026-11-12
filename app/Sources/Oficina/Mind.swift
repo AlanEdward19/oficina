@@ -204,6 +204,20 @@ final class BubbleController {
         }
     }
 
+    /// Recado com ela longe: o balão aparece onde ela costuma ficar e some sozinho.
+    func note(_ text: String) {
+        model.initiative = nil
+        model.text = text
+        guard !moving else { return }
+        show()
+        let shown = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
+            guard let self, self.model.text == shown, self.model.initiative == nil else { return }
+            self.model.text = nil
+            self.panel.orderOut(nil)
+        }
+    }
+
     func ask(_ initiative: InitiativeData?) {
         model.initiative = initiative
         if initiative == nil {

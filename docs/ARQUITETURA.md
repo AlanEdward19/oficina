@@ -69,6 +69,9 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 | `POST /v1/mind/initiatives/{id}/never` | "Nunca neste app" na pergunta da chamada |
 | `GET/POST /v1/hardware`, `GET/DELETE /v1/hardware/{id}` | Projetos da Oficina de hardware |
 | `GET /v1/hardware/{id}/diagram`, `POST /v1/hardware/{id}/run/{sim\|build\|erc\|firmware}`, `POST /v1/hardware/setup` | Simular, modelar e checar sem tokens; instalar o CAD |
+| `GET /v1/presence`, `POST /v1/presence/move`, `POST /v1/presence/call` | Onde ela está, levar, chamar (`force`) |
+| `POST /v1/bodies/pairing`, `POST /v1/bodies/network`, `DELETE /v1/bodies/{id}` | Parear e esquecer dispositivos |
+| `GET/POST /v1/voice/{id}`, `POST /v1/voice/{id}/text` | O Mac sintetiza e transcreve para os dispositivos |
 | `GET /v1/events` | SSE com `{kind: task\|delta\|usage\|resync}` |
 
 ## Conversas
@@ -144,6 +147,25 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
   chamada ("Entrou na reunião Daily no Zoom") e às anotações, e o cérebro sabe o que vem a seguir.
 - **Guardar:** `reunioes/<id>.json`, com as falas. No fim da chamada ela oferece o resumo (decisões, tarefas e
   dúvidas), que gasta tokens. "Esquecer tudo" apaga as reuniões.
+
+## Presença única
+
+- **Uma Faísca, um lugar.** A mente fica no core do Mac ("casa"). Dispositivos são corpos (`presence.rs`); só quem tem a
+  posse de presença fala e ouve. Ir para outro lugar manda "saiu" ao anterior e "chegou" ao novo.
+- **Porta só para dispositivos** (`body_listen`, `0.0.0.0:7879`), desligada até você parear um. Lá só existem as
+  rotas `/v1/body/*`, com um token por dispositivo, recebido em troca de um código de 6 dígitos que vale 10 minutos e
+  uma vez. A API principal continua só no localhost.
+- **Voz:** o core pede ao app do Mac a fala sintetizada (`AVSpeechSynthesizer`, WAV 16 kHz) e a transcrição do que a
+  caixa gravou (`SFSpeechRecognizer` no Mac). Os áudios ficam só na memória, no máximo 30 ou 24 MB. Sem o app, a caixa
+  recebe só o texto.
+- **Conversa no cômodo:** cada dispositivo tem sua conversa. O cérebro sabe onde ela está, fala curto quando é por voz e
+  pode ir até outro cômodo com `@@delegar presenca: <cômodo>: <fala>`. As respostas são faladas lá, e a caixa ouve a
+  réplica.
+- **Ocupada:** você chamando (abrir a conversa ou "Chamar de volta"), ela pesa a conversa de lá: com um pedido em
+  andamento, fica e te avisa; com conversa viva, avisa e vem em até 20 s; parada, vem. "Vem agora" (`force`) sempre traz,
+  com uma despedida no jeito da personalidade. Sozinha, ela volta após 90 s de silêncio ou se o dispositivo sumir.
+- **Botão da caixa:** chama a Faísca para lá, a não ser que você esteja falando com ela no Mac; aí ela te avisa.
+- Firmware e simulador em `devices/caixa/`.
 
 ## Oficina de hardware
 

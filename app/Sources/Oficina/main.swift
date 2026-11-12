@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let tools = Tools()
     private let calls = CallWatcher()
     private let agenda = Agenda()
+    private var deviceVoice: DeviceVoice!
     private var listener: CallListener!
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -106,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .store(in: &bag)
         watchPresence()
         watchCalls()
+        watchPresence2()
         core.start()
         if CommandLine.arguments.contains("--abrir-mente") { openMind() }
         if CommandLine.arguments.contains("--abrir-fabrica") {
@@ -212,6 +214,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.reportPresence(includeFocus: true) }
     }
 
+    // MARK: Presença única
+
+    private func watchPresence2() {
+        deviceVoice = DeviceVoice(core: core)
+        core.onVoice = { [weak self] job in self?.deviceVoice.handle(job) }
+        core.$presence
+            .receive(on: RunLoop.main)
+            .removeDuplicates()
+            .sink { [weak self] p in MainActor.assumeIsolated { self?.presenceChanged(p) } }
+            .store(in: &bag)
+    }
+
+    private var lastPresence: PresenceData?
+
+    private func presenceChanged(_ p: PresenceData?) {
+        guard let p else { return }
+        defer { lastPresence = p }
+        guard p.away != (lastPresence?.away ?? false) else { return }
+        if p.away {
+            // Avisa e sai: ela está na caixa de som agora.
+            pet.say("Fui à \(p.room).", force: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard self?.core.presence?.away == true else { return }
+                self?.pet.setAway(true)
+            }
+        } else {
+            pet.setAway(false)
+            pet.comeOut()
+        }
+    }
+
+    @objc private func callBackNow() {
+        Task { _ = await core.callPresence(force: true) }
+    }
+
+    @objc private func openDevices() {
+        openTool("dispositivos", title: "Dispositivos", size: NSSize(width: 680, height: 600), DevicesView(core: core, tint: colorFromHex(core.settings.body_color)))
+    }
+
     // MARK: Chamadas
 
     /// Percebe chamadas pelo microfone e, se você deixar, ouve e anota.
@@ -307,7 +348,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 bubble.ask(nil)
             }
         }
-        if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, !brief.sleeping, brief.mood != "focada" {
+        if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, pet.away {
+            // Longe, os recados chegam num balão sem ela.
+            bubble.note("\(core.settings.name), na \(core.presence?.room ?? "sala"): \(t.text)")
+        } else if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, !brief.sleeping, brief.mood != "focada" {
             let important = t.text.hasPrefix("Olha minha") || t.text.hasPrefix("Anotado") || t.text.hasPrefix("Modo ")
             pet.say(t.text, force: important)
         }
@@ -636,6 +680,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let meetings = NSMenuItem(title: "Reuniões…", action: #selector(openMeetings), keyEquivalent: "")
         meetings.target = self
         menu.addItem(meetings)
+        let devices = NSMenuItem(title: "Dispositivos…", action: #selector(openDevices), keyEquivalent: "")
+        devices.target = self
+        menu.addItem(devices)
+        if core.presence?.away == true {
+            let back = NSMenuItem(title: "Chamar a Faísca de volta agora", action: #selector(callBackNow), keyEquivalent: "")
+            back.target = self
+            menu.addItem(back)
+        }
         let calendar = NSMenuItem(title: "Usar a agenda", action: #selector(toggleAgenda), keyEquivalent: "")
         calendar.target = self
         calendar.state = agenda.enabled ? .on : .off
@@ -708,6 +760,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func openChat() {
         if !panel.isVisible { togglePanel() }
+        // Ela está em outro cômodo: abrir a conversa é chamá-la (pesando a conversa de lá).
+        if core.presence?.away == true {
+            Task { _ = await core.callPresence(force: false) }
+        }
     }
 
     /// ⌃⌥Espaço abre e fecha a conversa de qualquer lugar.
