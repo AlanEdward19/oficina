@@ -317,7 +317,9 @@ final class CallListener {
         self.engine = engine
 
         var note: String?
-        let theirs = processes.isEmpty ? nil : await makeTranscriptionChannel(who: "Outros", onText: send)
+        // `await` não pode ficar à direita do `?:`.
+        var theirs: TranscriptionChannel?
+        if !processes.isEmpty { theirs = await makeTranscriptionChannel(who: "Outros", onText: send) }
         if #available(macOS 14.2, *), let theirs {
             let t = ProcessTap()
             do {
