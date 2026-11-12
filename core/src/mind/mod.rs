@@ -493,6 +493,17 @@ impl Mind {
         s.work = work;
     }
 
+    /// Um recado dela para você, que aparece no balão.
+    pub fn note(&self, text: String) {
+        let now = now();
+        let mut s = self.state.lock().unwrap();
+        // Um recado sempre aparece, mesmo repetido.
+        s.thoughts.retain(|t| t.text != text);
+        think(&mut s, text, now);
+        drop(s);
+        self.publish();
+    }
+
     /// Reunião transcrita terminou: oferece o resumo.
     pub fn offer_summary(&self, meeting: &str, title: &str) {
         let now = now();

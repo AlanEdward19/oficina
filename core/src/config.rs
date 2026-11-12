@@ -27,6 +27,9 @@ pub struct Config {
     pub machines: Vec<Peer>,
     /// Repositório da Oficina no GitHub ("dono/nome"), para pedidos de melhoria.
     pub repo: Option<String>,
+    /// Porta só para dispositivos (caixa de som, celular), aberta quando você liga
+    /// "Aceitar dispositivos na rede". A API principal continua só no localhost.
+    pub body_listen: String,
 }
 
 impl Default for Config {
@@ -53,6 +56,7 @@ impl Default for Config {
             .to_vec(),
             machines: vec![],
             repo: None,
+            body_listen: "0.0.0.0:7879".into(),
         }
     }
 }
@@ -103,14 +107,15 @@ pub fn load(paths: &Paths) -> std::io::Result<(Config, String)> {
     if let Ok(listen) = std::env::var("OFICINA_LISTEN") {
         cfg.listen = listen;
     }
+    if let Ok(listen) = std::env::var("OFICINA_BODY_LISTEN") {
+        cfg.body_listen = listen;
+    }
 
     let token_path = paths.home.join("token");
     let token = match fs::read_to_string(&token_path) {
         Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => {
-            let mut raw = [0u8; 32];
-            fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
-            let t: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+            let t = random_hex(32)?;
             fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -122,4 +127,11 @@ pub fn load(paths: &Paths) -> std::io::Result<(Config, String)> {
         }
     };
     Ok((cfg, token))
+}
+
+/// Bytes aleatórios do sistema, em hexadecimal.
+pub fn random_hex(n: usize) -> std::io::Result<String> {
+    let mut raw = vec![0u8; n];
+    fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
+    Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
 }

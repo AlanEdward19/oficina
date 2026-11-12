@@ -2,8 +2,10 @@ use crate::{
     config::{Config, Paths, Peer},
     conv::Conversations,
     factory::{AgentSpec, Factory},
+    body::Voice,
     hardware::Hardware,
     meeting::Meetings,
+    presence::Presences,
     clean::Cleaner,
     router::{AUTO, Need, Router},
     peer,
@@ -61,6 +63,8 @@ pub struct Engine {
     pub mind: Arc<Mind>,
     pub meetings: Meetings,
     pub hardware: Hardware,
+    pub presence: Presences,
+    pub voice: Voice,
     /// Última vez que o PR do branch atual foi consultado no GitHub.
     pr_checked: Mutex<(String, u64, Option<context::FailingPr>)>,
 }
@@ -179,6 +183,7 @@ impl Engine {
         let router = Router::open(paths.home.join("router.json"));
         let meetings = Meetings::open(paths.home.join("reunioes"));
         let hardware = Hardware::open(paths.home.join("hardware"));
+        let presence = Presences::open(paths.home.join("presenca.json"), usage::now());
         // Tarefas de antes das conversas vão para uma conversa própria.
         if let Some(first) = store.has_orphans() {
             let c = convs.create(Some("Conversas anteriores"), Some(first));
@@ -203,6 +208,8 @@ impl Engine {
             refreshing: AtomicBool::new(false),
             meetings,
             hardware,
+            presence,
+            voice: Voice::default(),
             pr_checked: Mutex::new((String::new(), 0, None)),
         })
     }
@@ -219,6 +226,10 @@ impl Engine {
             return Err("mensagem vazia".into());
         }
         self.mind.observe_task(&text);
+        // Falar com ela no Mac conta como estar com ela em casa.
+        if conversation.as_deref().is_none_or(|c| self.presence.body_for_conversation(c).is_none()) {
+            self.presence.home_activity(usage::now());
+        }
         // Tarefa repassada por outra máquina não abre conversa aqui.
         let conversation = if machine.as_deref() == Some("local") {
             None
@@ -632,10 +643,11 @@ impl Engine {
         } else {
             format!(" Agentes da sua fábrica: {roster}. Para passar uma tarefa a um deles, responda SOMENTE com `@@delegar agente: <nome>: <tarefa>`.")
         };
+        let place = self.presence_prompt(&conv);
         let system = if delegate {
-            format!("{base}{memory}{BRAIN_DELEGATE}{roster}")
+            format!("{base}{memory}{BRAIN_DELEGATE}{roster}{place}")
         } else {
-            format!("{base}{memory}")
+            format!("{base}{memory}{place}")
         };
         // O cérebro só conversa e delega: quem executa é o agente, então Opus aqui seria desperdício.
         let model = if me.brain_model == AUTO { self.router.choose(&conv, Need { ceiling: 1, ..Need::plain(text) }).model } else { me.brain_model.as_str() };
@@ -710,6 +722,10 @@ impl Engine {
                         t.status = Status::AwaitingApproval;
                     }
                 });
+            }
+            Some((Dest::Presence(place), text)) => {
+                let result = self.go(&place, &text).map(|b| Some(format!("Fui até a {} e falei: \"{text}\"", b.room)));
+                self.finish(id, result);
             }
             None => self.finish(id, Ok(Some(out.text))),
         }

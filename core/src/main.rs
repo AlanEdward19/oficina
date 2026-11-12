@@ -1,4 +1,5 @@
 mod clean;
+mod body;
 mod config;
 mod conv;
 mod engine;
@@ -7,6 +8,7 @@ mod hardware;
 mod meeting;
 mod mind;
 mod peer;
+mod presence;
 mod route;
 mod router;
 mod store;
@@ -37,6 +39,8 @@ use tokio::{
 struct App {
     engine: Arc<Engine>,
     token: Arc<str>,
+    /// A porta dos dispositivos, quando ligada.
+    bodies: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +54,11 @@ struct Message {
 
 fn auto() -> Target {
     Target::Auto
+}
+
+/// Para os outros módulos: mesma comparação em tempo constante.
+pub(crate) fn token_eq(given: &str, expected: &str) -> bool {
+    token_matches(given, expected)
 }
 
 /// Compara sem encerrar no primeiro byte diferente.
@@ -494,6 +503,239 @@ async fn brain_reset(State(app): State<App>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+// MARK: Presença (as suas rotas)
+
+async fn presence_get(State(app): State<App>) -> impl IntoResponse {
+    Json(app.engine.presence_view())
+}
+
+#[derive(Deserialize)]
+struct MoveBody {
+    to: String,
+    #[serde(default)]
+    text: String,
+}
+
+async fn presence_move(State(app): State<App>, Json(m): Json<MoveBody>) -> Response {
+    match app.engine.go(&m.to, &m.text) {
+        Ok(_) => Json(app.engine.presence_view()).into_response(),
+        Err(e) if m.to == presence::HOME => { let _ = e; Json(app.engine.presence_view()).into_response() }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CallBody {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn presence_call(State(app): State<App>, Json(c): Json<CallBody>) -> impl IntoResponse {
+    Json(app.engine.owner_call(c.force))
+}
+
+/// Liga ou desliga a porta dos dispositivos na rede.
+fn set_body_network(app: &App, on: bool) -> Result<(), String> {
+    let mut slot = app.bodies.lock().unwrap();
+    if let Some(h) = slot.take() {
+        h.abort();
+    }
+    app.engine.presence.set_network(on);
+    if on {
+        let addr = app.engine.cfg.body_listen.clone();
+        let std_listener = std::net::TcpListener::bind(&addr).map_err(|e| format!("não consegui abrir {addr}: {e}"))?;
+        std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let listener = tokio::net::TcpListener::from_std(std_listener).map_err(|e| e.to_string())?;
+        let router = body_router(app.engine.clone());
+        *slot = Some(tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        }));
+        eprintln!("oficinad: dispositivos em {addr}");
+    }
+    app.engine.publish_presence();
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct NetworkBody {
+    on: bool,
+}
+
+async fn bodies_network(State(app): State<App>, Json(n): Json<NetworkBody>) -> Response {
+    match set_body_network(&app, n.on) {
+        Ok(()) => Json(app.engine.presence_view()).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// Um código para parear uma caixa de som. Liga a porta dos dispositivos.
+async fn bodies_pairing(State(app): State<App>) -> Response {
+    if !app.engine.presence.network() || app.bodies.lock().unwrap().is_none() {
+        if let Err(e) = set_body_network(&app, true) {
+            return (StatusCode::BAD_REQUEST, e).into_response();
+        }
+    }
+    let code = app.engine.presence.start_pairing(usage::now());
+    app.engine.publish_presence();
+    Json(serde_json::json!({"code": code, "port": app.engine.cfg.body_listen})).into_response()
+}
+
+async fn bodies_forget(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    match app.engine.presence.forget(&id) {
+        Some(b) => {
+            app.engine.convs.delete(&b.conversation);
+            app.engine.publish_presence();
+            StatusCode::NO_CONTENT
+        }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+async fn voice_get(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.voice_clip(&id) {
+        Some(bytes) => ([(header::CONTENT_TYPE, "audio/wav")], bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn voice_put(State(app): State<App>, Path(id): Path<String>, bytes: axum::body::Bytes) -> StatusCode {
+    if app.engine.voice_rendered(&id, bytes.to_vec()) { StatusCode::NO_CONTENT } else { StatusCode::BAD_REQUEST }
+}
+
+#[derive(Deserialize)]
+struct VoiceText {
+    text: String,
+}
+
+async fn voice_text(State(app): State<App>, Path(id): Path<String>, Json(t): Json<VoiceText>) -> Response {
+    match app.engine.voice_text(&id, &t.text) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e).into_response(),
+    }
+}
+
+// MARK: Presença (as rotas dos dispositivos, na porta deles)
+
+#[derive(Clone)]
+struct BodyApp {
+    engine: Arc<Engine>,
+}
+
+/// Só tokens de dispositivo entram; cada pedido conta como sinal de vida.
+async fn body_auth(State(app): State<BodyApp>, mut req: Request, next: Next) -> Response {
+    let token = req.headers().get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer "));
+    match token.and_then(|t| app.engine.presence.auth(t)) {
+        Some(b) => {
+            app.engine.presence.heartbeat(&b.id, usage::now());
+            req.extensions_mut().insert(b);
+            next.run(req).await
+        }
+        None => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PairBody {
+    code: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    room: String,
+    #[serde(default)]
+    kind: String,
+}
+
+async fn body_pair(State(app): State<BodyApp>, Json(p): Json<PairBody>) -> Response {
+    let conv = app.engine.convs.create(Some(&format!("Voz · {}", if p.room.trim().is_empty() { "sala" } else { p.room.trim() })), None);
+    match app.engine.presence.pair(&p.code, &p.name, &p.room, &p.kind, conv.id.clone(), usage::now()) {
+        Ok(b) => {
+            app.engine.publish_presence();
+            Json(serde_json::json!({"id": b.id, "token": b.token, "name": b.name, "room": b.room})).into_response()
+        }
+        Err(e) => {
+            app.engine.convs.delete(&conv.id);
+            (StatusCode::FORBIDDEN, e).into_response()
+        }
+    }
+}
+
+async fn body_heartbeat(State(app): State<BodyApp>) -> impl IntoResponse {
+    let v = app.engine.presence_view();
+    Json(serde_json::json!({"holder": v.holder}))
+}
+
+/// Espera até 25 s por comandos: é assim que a caixa recebe o que fazer.
+async fn body_next(
+    State(app): State<BodyApp>,
+    axum::Extension(b): axum::Extension<presence::Body>,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    // `?wait=20` sem puxar o extrator de query só por isso.
+    let wait = uri.query().unwrap_or("").split('&').find_map(|kv| kv.strip_prefix("wait=")).and_then(|v| v.parse::<u64>().ok());
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(wait.unwrap_or(20).min(25));
+    loop {
+        let notified = app.engine.presence.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let commands = app.engine.presence.take(&b.id);
+        let here = app.engine.presence.holder() == b.id;
+        if !commands.is_empty() || tokio::time::Instant::now() >= until {
+            return Json(serde_json::json!({"commands": commands, "here": here}));
+        }
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep_until(until) => {}
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct Heard {
+    text: String,
+}
+
+async fn body_heard(State(app): State<BodyApp>, axum::Extension(b): axum::Extension<presence::Body>, Json(h): Json<Heard>) -> Response {
+    match app.engine.heard(&b, &h.text) {
+        Ok(_) => StatusCode::ACCEPTED.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e).into_response(),
+    }
+}
+
+async fn body_audio_in(State(app): State<BodyApp>, axum::Extension(b): axum::Extension<presence::Body>, bytes: axum::body::Bytes) -> Response {
+    match app.engine.body_audio(&b, bytes.to_vec()) {
+        Ok(id) => (StatusCode::ACCEPTED, Json(serde_json::json!({"id": id}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+async fn body_audio_out(State(app): State<BodyApp>, Path(id): Path<String>) -> Response {
+    match app.engine.voice_clip(&id) {
+        Some(bytes) => ([(header::CONTENT_TYPE, "audio/wav")], bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn body_call(State(app): State<BodyApp>, axum::Extension(b): axum::Extension<presence::Body>) -> impl IntoResponse {
+    Json(serde_json::json!({"result": app.engine.body_call(&b)}))
+}
+
+fn body_router(engine: Arc<Engine>) -> Router {
+    let app = BodyApp { engine };
+    let private = Router::new()
+        .route("/v1/body/heartbeat", post(body_heartbeat))
+        .route("/v1/body/next", get(body_next))
+        .route("/v1/body/heard", post(body_heard))
+        .route("/v1/body/audio", post(body_audio_in))
+        .route("/v1/body/audio/{id}", get(body_audio_out))
+        .route("/v1/body/call", post(body_call))
+        .route_layer(middleware::from_fn_with_state(app.clone(), body_auth));
+    Router::new()
+        .route("/v1/body/pair", post(body_pair))
+        .merge(private)
+        .layer(axum::extract::DefaultBodyLimit::max(body::MAX_AUDIO + 1024))
+        .with_state(app)
+}
+
 async fn events(
     State(app): State<App>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -542,10 +784,25 @@ async fn main() {
             tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         }
     });
+    // A presença: falar as respostas nos corpos e voltar para casa na hora certa.
+    let present = engine.clone();
+    let started = usage::now();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            present.presence_tick(started).await;
+        }
+    });
     let app = App {
         engine,
         token: token.into(),
+        bodies: Default::default(),
     };
+    if app.engine.presence.network() {
+        if let Err(e) = set_body_network(&app, true) {
+            eprintln!("oficinad: {e}");
+        }
+    }
 
     let private = Router::new()
         .route("/v1/machines", get(machines))
@@ -594,6 +851,14 @@ async fn main() {
         .route("/v1/hardware/{id}", get(hardware_get).delete(hardware_delete))
         .route("/v1/hardware/{id}/run/{what}", post(hardware_run))
         .route("/v1/hardware/{id}/diagram", get(hardware_diagram))
+        .route("/v1/presence", get(presence_get))
+        .route("/v1/presence/move", post(presence_move))
+        .route("/v1/presence/call", post(presence_call))
+        .route("/v1/bodies/pairing", post(bodies_pairing))
+        .route("/v1/bodies/network", post(bodies_network))
+        .route("/v1/bodies/{id}", delete(bodies_forget))
+        .route("/v1/voice/{id}", get(voice_get).post(voice_put))
+        .route("/v1/voice/{id}/text", post(voice_text))
         .route("/v1/usage", get(usage))
         .route("/v1/usage/refresh", post(usage_refresh))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));

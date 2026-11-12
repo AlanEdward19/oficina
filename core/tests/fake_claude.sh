@@ -53,6 +53,7 @@ case "$prompt" in
   *delegar-melhoria*) t='@@delegar melhoria: roupa: chapéu de pirata com tapa-olho' ;;
   *delegar-nuvem*) t='@@delegar nuvem: fazer na nuvem' ;;
   *delegar-pc*)    t='@@delegar maquina: fazer no pc' ;;
+  *chamar-sala*)   t='@@delegar presenca: sala: Ana, o Alan está te chamando' ;;
   *lento*)         trap 'exit 130' INT; sleep 30 & wait; t='nunca' ;;
   *erro*)
     echo '{"type":"result","result":"Please run /login","is_error":true,"session_id":"sess-1"}'
