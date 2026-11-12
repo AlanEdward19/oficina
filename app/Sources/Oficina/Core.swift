@@ -520,6 +520,10 @@ final class Core: ObservableObject {
         return data.flatMap { try? JSONDecoder().decode(HardwareRun.self, from: $0) }
     }
 
+    func hardwareDiagram(_ id: String) async -> BlockDiagram? {
+        await get("hardware/\(id)/diagram")
+    }
+
     func setupHardware() {
         Task { _ = await post("hardware/setup") }
     }

@@ -68,7 +68,7 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 | `POST /v1/meetings/{id}/segments`, `…/end`, `…/summarize` | Falas, fim e resumo (o resumo gasta tokens) |
 | `POST /v1/mind/initiatives/{id}/never` | "Nunca neste app" na pergunta da chamada |
 | `GET/POST /v1/hardware`, `GET/DELETE /v1/hardware/{id}` | Projetos da Oficina de hardware |
-| `POST /v1/hardware/{id}/run/{sim\|build\|erc}`, `POST /v1/hardware/setup` | Simular, modelar e checar sem tokens; instalar o CAD |
+| `GET /v1/hardware/{id}/diagram`, `POST /v1/hardware/{id}/run/{sim\|build\|erc\|firmware}`, `POST /v1/hardware/setup` | Simular, modelar e checar sem tokens; instalar o CAD |
 | `GET /v1/events` | SSE com `{kind: task\|delta\|usage\|resync}` |
 
 ## Conversas
@@ -135,9 +135,13 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
   "Nunca no Zoom", que fica guardado. Vale 60 s.
 - **Ouvir** (`Listen.swift`): o microfone (AVAudioEngine) vira "Você"; um *process tap* do Core Audio só nos processos
   do app da chamada (macOS 14.2+, permissão "Gravação de áudio do sistema", não de tela) vira "Outros". Cada
-  fonte passa pelo `SFSpeechRecognizer` em português, no Mac (`requiresOnDeviceRecognition`); sem reconhecimento
-  local, ela não ouve. Pedaços de 25 s viram falas no core. O áudio nunca é gravado. Enquanto ouve, a
+  fonte passa pelo `SpeechAnalyzer` + `SpeechTranscriber` no macOS 26 (o modelo de português é baixado uma vez pelo
+  sistema) ou, antes dele, pelo `SFSpeechRecognizer` no Mac (`requiresOnDeviceRecognition`); sem reconhecimento
+  local, ela não ouve. O código do macOS 26 só entra quando o app é compilado com Xcode 26 (`#if compiler(>=6.2)`). Pedaços de 25 s viram falas no core. O áudio nunca é gravado. Enquanto ouve, a
   Faísca usa fones com um selo REC, e o menu dela ganha "Parar de ouvir a chamada".
+- **Agenda** (`Agenda.swift`, desligada até você ligar "Usar a agenda" no menu): o app manda à mente só título,
+  início e fim dos eventos das próximas horas. Ela avisa uma vez quando faltam 10 minutos, dá nome à pergunta da
+  chamada ("Entrou na reunião Daily no Zoom") e às anotações, e o cérebro sabe o que vem a seguir.
 - **Guardar:** `reunioes/<id>.json`, com as falas. No fim da chamada ela oferece o resumo (decisões, tarefas e
   dúvidas), que gasta tokens. "Esquecer tudo" apaga as reuniões.
 
@@ -155,6 +159,12 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
   instalado pela tela, cerca de 2 GB). O ajudante `oficina_cad.py` exporta um STL por peça, `montagem.step`, massa
   pelo material e as interferências entre peças, que entram nas simulações como "Encaixe".
 - `hw erc` compila o esquemático com atopile ou roda o ERC do KiCad, se algum estiver instalado.
+- `hw firmware` compila `firmware/platformio.ini` com o PlatformIO do ambiente da Oficina e, se houver
+  `firmware/renode.resc`, roda 5 s no Renode sem janela, com `$bin` (o ELF) e `$uart` (o log serial). Cada linha de
+  `firmware/esperado.txt` precisa aparecer na serial; o resultado entra nas simulações como "Firmware". O Renode
+  emula Cortex-M e RISC-V; o ESP32-S3 (Xtensa) só compila.
+- O diagrama de blocos (`eletrica/diagrama.mmd`) é lido pelo core (`hardware/diagram.rs`): blocos, setas e rótulos,
+  em camadas pelo maior caminho. O app desenha no Canvas, sem navegador; `GET /v1/hardware/{id}/diagram`.
 - A tela mostra o pacote em abas e o modelo 3D em SceneKit (STL via ModelIO), com vista explodida.
 
 ## Dock

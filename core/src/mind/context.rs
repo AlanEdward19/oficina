@@ -55,6 +55,7 @@ pub struct WorkContext {
     pub subjects: Vec<String>,
     pub call: Option<String>,
     pub pending: Vec<String>,
+    pub agenda: Option<String>,
 }
 
 /// O dia em blocos: tempo por projeto e em reunião. Só números.

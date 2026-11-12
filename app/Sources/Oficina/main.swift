@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var clipKey: EventHotKeyRef?
     let tools = Tools()
     private let calls = CallWatcher()
+    private let agenda = Agenda()
     private var listener: CallListener!
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -231,6 +232,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             }
         }
         calls.start()
+        agenda.onEvents = { [weak self] events in self?.core.mindEvents(events) }
+        // Espera o core conectar antes da primeira leitura.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.agenda.start() }
+    }
+
+    @objc private func toggleAgenda() {
+        let on = !agenda.enabled
+        Task {
+            let ok = await agenda.setEnabled(on)
+            if on {
+                pet.say(ok ? "Agora eu vejo os horários da sua agenda. Te aviso antes das reuniões." : "Sem acesso ao Calendário. Dá para liberar em Ajustes do Sistema > Privacidade.", force: true)
+            }
+        }
     }
 
     /// Enquanto ouve, ela usa fones: dá para ver de longe que está ouvindo.
@@ -253,7 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         let processes = calls.processObjects(of: app)
         Task {
-            if let note = await listener.start(app: app, processes: processes) {
+            if let note = await listener.start(app: app, processes: processes, title: agenda.current() ?? "") {
                 pet.say(note, force: true)
             } else {
                 pet.say("Tô ouvindo e anotando. Para parar, clique com o botão direito em mim.", force: true)
@@ -622,6 +636,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let meetings = NSMenuItem(title: "Reuniões…", action: #selector(openMeetings), keyEquivalent: "")
         meetings.target = self
         menu.addItem(meetings)
+        let calendar = NSMenuItem(title: "Usar a agenda", action: #selector(toggleAgenda), keyEquivalent: "")
+        calendar.target = self
+        calendar.state = agenda.enabled ? .on : .off
+        menu.addItem(calendar)
         let cleaner = NSMenuItem(title: "Limpeza do Disco…", action: #selector(openCleaner), keyEquivalent: "")
         cleaner.target = self
         menu.addItem(cleaner)

@@ -5,6 +5,7 @@
 //! Os agentes não têm shell livre: só `oficinad hw …`, que roda as
 //! simulações, o modelo em build123d e a checagem elétrica.
 
+pub mod diagram;
 pub mod sim;
 
 use crate::engine::Engine;
@@ -230,6 +231,8 @@ fn setup_env(root: &Path) -> Result<(), String> {
     }
     // atopile é opcional: sem ele, a checagem elétrica usa o KiCad, se houver.
     let _ = pip(&["atopile"]);
+    // PlatformIO compila o firmware; baixa cada toolchain só quando um projeto pede.
+    let _ = pip(&["platformio"]);
     Ok(())
 }
 
@@ -267,9 +270,13 @@ e termica {{potencia_w, area_cm2}}. Correntes e massas vêm do datasheet; diga a
 Termine com `from oficina_cad import exportar` e `exportar({{\"Nome\": (parte, \"PETG\"), \"Peça comprada\": (volume_dela, None)}})`. \
 Use os mesmos nomes de peças da especificação. Peças compradas entram como volumes simples para checar encaixe.\n\
 - montagem.md: passo a passo numerado, ferramentas, cuidados (LiPo sempre com proteção) e o teste de cada passo.\n\
-- firmware/: código inicial que liga as peças.\n\
+- firmware/: código inicial que liga as peças, como projeto PlatformIO (firmware/platformio.ini). \
+Para simular sem placa, escreva firmware/renode.resc (Renode: placas Cortex-M como nRF52840 e STM32, e RISC-V; \
+o ESP32-S3 é Xtensa e o Renode não emula, então nele vale só compilar). O script recebe $bin (o ELF) e $uart \
+(o arquivo do log serial): use `sysbus LoadELF $bin` e `sysbus.uart0 CreateFileBackend $uart true`, com o nome certo da UART. \
+Em firmware/esperado.txt, uma linha por texto que precisa aparecer na serial.\n\
 Ferramentas: `{exe} hw sim .` (autonomia, peso, custo, calor; gera simulacoes/ e bom.csv), \
-`{exe} hw build .` (roda o modelo, exporta STL/STEP, checa interferências e roda as simulações) e `{exe} hw erc .` (checagem elétrica). \
+`{exe} hw build .` (roda o modelo, exporta STL/STEP, checa interferências e roda as simulações) `{exe} hw erc .` (checagem elétrica) e `{exe} hw firmware .` (compila e, com renode.resc, simula e confere esperado.txt). \
 Rode exatamente assim, sem aspas, de dentro da pasta.\n\
 Etapas: em Investigar, pesquise e leia o que já existe na pasta. Em Propor, compare 2 ou 3 arquiteturas e recomende uma, \
 com números. Em Executar, escreva todos os arquivos e rode `hw build` (ou `hw sim`, se o CAD não estiver instalado). \
@@ -340,6 +347,9 @@ pub fn simulate(dir: &Path) -> Result<(Report, String), String> {
             ok: Some(clashes.is_empty()),
             detalhe: if clashes.is_empty() { "Nenhuma peça ocupa o espaço de outra.".into() } else { clashes.join("; ") },
         });
+    }
+    if let Some(fw) = fs::read(dir.join("simulacoes/firmware.json")).ok().and_then(|b| serde_json::from_slice::<FirmwareReport>(&b).ok()) {
+        report.checks.push(fw.check());
     }
     let md = sim::markdown(&spec, &report);
     let out = dir.join("simulacoes");
@@ -422,7 +432,130 @@ pub fn erc(root: &Path, dir: &Path) -> Result<String, String> {
 Sem atopile nem KiCad instalados, a checagem fica pelo mapa elétrico.".into())
 }
 
-/// `oficinad hw <sim|build|erc|bom|setup> [pasta]`. Devolve o código de saída.
+// MARK: Firmware
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FirmwareReport {
+    pub compiled: Option<bool>,
+    pub simulated: Option<bool>,
+    /// Linhas de esperado.txt que não apareceram na serial.
+    pub missing: Vec<String>,
+    pub expected: usize,
+    pub note: String,
+}
+
+impl FirmwareReport {
+    fn check(&self) -> Check {
+        let ok = match (self.compiled, self.simulated) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            _ if !self.missing.is_empty() => Some(false),
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            _ => None,
+        };
+        let valor = match (self.compiled, self.simulated) {
+            (_, Some(true)) if self.expected > 0 => format!("{} de {} na serial", self.expected - self.missing.len(), self.expected),
+            (_, Some(true)) => "simulado".into(),
+            (_, Some(false)) => "simulação falhou".into(),
+            (Some(true), None) => "compila".into(),
+            (Some(false), _) => "não compila".into(),
+            _ => "sem firmware".into(),
+        };
+        let detalhe = if self.missing.is_empty() { self.note.clone() } else { format!("Faltou na serial: {}. {}", self.missing.join("; "), self.note) };
+        Check { nome: "Firmware".into(), valor, limite: "compila e responde".into(), ok, detalhe }
+    }
+}
+
+/// Linhas esperadas que não aparecem no log.
+pub fn missing_lines(expected: &str, log: &str) -> (usize, Vec<String>) {
+    let lines: Vec<&str> = expected.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+    let missing = lines.iter().filter(|l| !log.contains(**l)).map(|l| l.to_string()).collect();
+    (lines.len(), missing)
+}
+
+fn renode() -> Option<PathBuf> {
+    for app in ["/Applications/Renode.app/Contents/MacOS/macos_run.command", "/Applications/Renode.app/Contents/MacOS/renode"] {
+        if Path::new(app).exists() {
+            return Some(app.into());
+        }
+    }
+    Command::new("renode").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().ok()?.success().then(|| "renode".into())
+}
+
+fn find_elf(dir: &Path) -> Option<PathBuf> {
+    let build = dir.join("firmware/.pio/build");
+    let from_pio = fs::read_dir(&build).into_iter().flatten().flatten().map(|e| e.path().join("firmware.elf")).find(|p| p.exists());
+    from_pio.or_else(|| fs::read_dir(dir.join("firmware")).into_iter().flatten().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "elf")))
+}
+
+/// Compila com PlatformIO (se houver platformio.ini) e simula no Renode (se
+/// houver renode.resc). Grava simulacoes/firmware.json e roda as simulações.
+pub fn firmware(root: &Path, dir: &Path) -> Result<String, String> {
+    let fw = dir.join("firmware");
+    let mut r = FirmwareReport::default();
+    let mut out = String::new();
+    if fw.join("platformio.ini").exists() {
+        let pio = env_dir(root).join("bin/pio");
+        if !pio.exists() {
+            return Err("PlatformIO não está instalado: instale o ambiente de CAD na tela da Oficina de hardware.".into());
+        }
+        let mut cmd = Command::new(pio);
+        cmd.args(["run", "-d"]).arg(&fw);
+        let (ok, text) = run_limited(cmd, Duration::from_secs(900))?;
+        r.compiled = Some(ok);
+        out.push_str(&text);
+        if !ok {
+            r.note = "A compilação falhou; veja a saída do PlatformIO.".into();
+        }
+    }
+    let elf = find_elf(dir);
+    let resc = fw.join("renode.resc");
+    if r.compiled != Some(false) && resc.exists() {
+        match (renode(), &elf) {
+            (None, _) => r.note = "Sem Renode instalado (renode.io): o firmware não foi simulado.".into(),
+            (_, None) => r.note = "Sem ELF para simular: compile antes (platformio.ini) ou deixe um .elf em firmware/.".into(),
+            (Some(bin), Some(elf)) => {
+                let log = dir.join("simulacoes/uart.log");
+                let _ = fs::create_dir_all(dir.join("simulacoes"));
+                let _ = fs::remove_file(&log);
+                let help = Command::new(&bin).arg("--help").stdin(Stdio::null()).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+                let headless = if help.contains("--disable-gui") { "--disable-gui" } else { "--disable-xwt" };
+                let script = format!(
+                    "$bin=@{}; $uart=@{}; include @{}; emulation RunFor \"00:00:05\"; quit",
+                    elf.display(), log.display(), resc.display()
+                );
+                let mut cmd = Command::new(&bin);
+                cmd.current_dir(&fw).args([headless, "--console", "--plain", "-e", &script]);
+                let (_, text) = run_limited(cmd, Duration::from_secs(180))?;
+                out.push_str(&text);
+                let serial = fs::read_to_string(&log).unwrap_or_default();
+                r.simulated = Some(!serial.is_empty() || !text.to_lowercase().contains("error"));
+                if let Ok(expected) = fs::read_to_string(fw.join("esperado.txt")) {
+                    let (n, missing) = missing_lines(&expected, &serial);
+                    r.expected = n;
+                    r.missing = missing;
+                }
+                r.note = format!("Renode rodou 5 s de simulação; serial em simulacoes/uart.log ({} bytes).", serial.len());
+            }
+        }
+    } else if r.compiled.is_none() {
+        return Err("sem firmware para checar: crie firmware/platformio.ini (e firmware/renode.resc para simular).".into());
+    }
+    if r.compiled == Some(true) && r.simulated.is_none() && r.note.is_empty() {
+        r.note = "Compilou. Para simular, escreva firmware/renode.resc (placas Cortex-M ou RISC-V).".into();
+    }
+    let _ = fs::create_dir_all(dir.join("simulacoes"));
+    fs::write(dir.join("simulacoes/firmware.json"), serde_json::to_vec_pretty(&r).unwrap_or_default()).map_err(|e| e.to_string())?;
+    let (_, md) = simulate(dir)?;
+    let tail: String = out.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
+    Ok(format!("{tail}\n{}\n{md}", r.check().detalhe))
+}
+
+/// O diagrama de blocos já posicionado, para o app desenhar.
+pub fn diagram_of(dir: &Path) -> Option<diagram::Diagram> {
+    diagram::parse(&fs::read_to_string(dir.join("eletrica/diagrama.mmd")).ok()?)
+}
+
+/// `oficinad hw <sim|build|erc|firmware|bom|setup> [pasta]`. Devolve o código de saída.
 pub fn cli(home: &Path, args: &[String]) -> i32 {
     let root = home.join("hardware");
     let _ = fs::create_dir_all(&root);
@@ -443,7 +576,8 @@ pub fn cli(home: &Path, args: &[String]) -> i32 {
         "bom" => read_spec(&dir).and_then(|s| fs::write(dir.join("bom.csv"), sim::bom(&s)).map_err(|e| e.to_string())).map(|_| "bom.csv gerado.".into()),
         "build" => build(&root, &dir),
         "erc" => erc(&root, &dir),
-        _ => Err("uso: oficinad hw <sim|build|erc|bom|setup> [pasta]".into()),
+        "firmware" => firmware(&root, &dir),
+        _ => Err("uso: oficinad hw <sim|build|erc|firmware|bom|setup> [pasta]".into()),
     };
     match result {
         Ok(out) => { println!("{out}"); 0 }
@@ -570,6 +704,22 @@ mod tests {
         assert!(inside(&h.root, &dir).is_ok());
         assert!(inside(&h.root, &std::env::temp_dir()).is_err());
         assert!(build(&h.root, &dir).unwrap_err().contains("modelo.py"));
+    }
+
+    #[test]
+    fn firmware_confere_a_serial_e_entra_no_relatorio() {
+        let (n, missing) = missing_lines("# comentário\nOficina pronta\nfoto enviada\n", "boot\nOficina pronta\n");
+        assert_eq!((n, missing), (2, vec!["foto enviada".to_string()]));
+        let h = hw();
+        let p = h.create("Placa", "ideia", 1).unwrap();
+        let dir = h.root.join(&p.id);
+        assert!(firmware(&h.root, &dir).unwrap_err().contains("platformio.ini"));
+        let r = FirmwareReport { compiled: Some(true), simulated: Some(true), expected: 2, missing: vec!["x".into()], note: String::new() };
+        fs::write(dir.join("simulacoes/firmware.json"), serde_json::to_vec(&r).unwrap()).unwrap();
+        let (report, _) = simulate(&dir).unwrap();
+        let fw = report.checks.iter().find(|c| c.nome == "Firmware").unwrap();
+        assert_eq!((fw.valor.as_str(), fw.ok), ("1 de 2 na serial", Some(false)));
+        assert!(diagram_of(&dir).is_some(), "o esqueleto já tem um diagrama válido");
     }
 
     #[test]

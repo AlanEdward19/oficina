@@ -58,7 +58,20 @@ pub struct MindEvent {
     pub running: Option<Vec<String>>,
     #[serde(default)]
     pub secs: Option<f64>,
+    /// Agenda: só título e horários.
+    #[serde(default)]
+    pub events: Option<Vec<CalEvent>>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CalEvent {
+    pub title: String,
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Avisa da reunião quando faltam até 10 minutos.
+const AGENDA_LEAD: u64 = 600;
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -184,6 +197,8 @@ struct State {
     /// PR com CI vermelho que ela já ofereceu investigar.
     ci_offered: Option<u64>,
     commit_offered: u64,
+    agenda: Vec<CalEvent>,
+    announced: HashSet<String>,
     /// Colocada para descansar na Dock: dorme até aqui, mesmo com você por perto.
     rest_until: u64,
     work_streak: f64,
@@ -230,6 +245,22 @@ fn local_day(ts: u64) -> u32 {
     }
 }
 
+/// "15:30" no fuso local.
+fn local_hm(ts: u64) -> String {
+    // SAFETY: `tm` é preenchida por localtime_r antes de ser lida.
+    unsafe {
+        let t = ts as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    }
+}
+
+/// O evento acontecendo agora (com folga de 10 min antes do início).
+fn current_event(agenda: &[CalEvent], now: u64) -> Option<&CalEvent> {
+    agenda.iter().find(|e| e.start.saturating_sub(AGENDA_LEAD) <= now && now < e.end)
+}
+
 fn pick<'a>(options: &[&'a str], salt: u64) -> &'a str {
     options[(salt as usize) % options.len()]
 }
@@ -263,6 +294,8 @@ impl Mind {
                 activity_since: now,
                 ci_offered: None,
                 commit_offered: 0,
+                agenda: Vec::new(),
+                announced: HashSet::new(),
                 rest_until: 0,
                 work_streak: 0.0,
                 mood: "neutra".into(),
@@ -329,6 +362,15 @@ impl Mind {
                     }
                 }
                 "dock_open" => pulse(&mut s, TROCA, 0.4),
+                "calendar" => {
+                    let mut events: Vec<CalEvent> = e.events.unwrap_or_default().into_iter()
+                        .filter(|e| e.end > now && e.end > e.start)
+                        .map(|e| CalEvent { title: e.title.chars().filter(|c| !c.is_control()).take(120).collect(), ..e })
+                        .collect();
+                    events.sort_by_key(|e| e.start);
+                    events.truncate(10);
+                    s.agenda = events;
+                }
                 "call_start" => {
                     let (Some(bundle), Some(name)) = (e.bundle, e.name) else { continue };
                     if s.call.as_ref().is_some_and(|c| c.bundle == bundle) {
@@ -341,10 +383,14 @@ impl Mind {
                     // A pergunta passa na frente de qualquer outra iniciativa.
                     if !s.mem.call_never.contains(&bundle) {
                         s.seq += 1;
+                        let what = match current_event(&s.agenda, now) {
+                            Some(ev) => format!("Entrou na reunião \"{}\" no {name}.", ev.title),
+                            None => format!("Entrou numa chamada no {name}."),
+                        };
                         s.initiative = Some(Initiative {
                             id: format!("i{now:x}{:x}", s.seq),
                             kind: format!("listen:{bundle}"),
-                            text: format!("Entrou numa chamada no {name}. Quer que eu ouça e anote? Fica tudo no Mac."),
+                            text: format!("{what} Quer que eu ouça e anote? Fica tudo no Mac."),
                             accept: "Ouvir".into(),
                             decline: "Agora não".into(),
                             action: Action::Listen { bundle, name: name.clone() },
@@ -424,6 +470,10 @@ impl Mind {
         if !ctx.is_empty() {
             out.push(' ');
             out.push_str(&ctx);
+        }
+        if let Some(a) = agenda_line(&s.agenda, now) {
+            out.push(' ');
+            out.push_str(&a);
         }
         if let Some(today) = s.mem.diary.sentence() {
             out.push_str(&format!(" Hoje até agora: {today}"));
@@ -570,6 +620,26 @@ impl Mind {
                 s.initiative = None;
                 s.net.reward(-0.2);
                 s.mem.bandit.entry(kind).or_default().declined += 0;
+            }
+        }
+        // Reunião chegando: avisa uma vez, sem esperar vontade nem intervalo.
+        if s.initiative.is_none() && !in_call && !s.sleeping && present {
+            let soon = s.agenda.iter()
+                .find(|e| e.start > now && e.start - now <= AGENDA_LEAD && !s.announced.contains(&format!("{}@{}", e.title, e.start)))
+                .cloned();
+            if let Some(e) = soon {
+                s.announced.insert(format!("{}@{}", e.title, e.start));
+                s.seq += 1;
+                s.initiative = Some(Initiative {
+                    id: format!("i{now:x}{:x}", s.seq),
+                    kind: "agenda".into(),
+                    text: format!("\"{}\" começa às {}. Quando a chamada abrir, posso ouvir e anotar.", e.title, local_hm(e.start)),
+                    accept: "Valeu".into(),
+                    decline: "Ok".into(),
+                    action: Action::None,
+                    at: now,
+                    never: None,
+                });
             }
         }
         let wants = s.net.motor("iniciativa") > 0.25 && s.net.motor("foco") < 0.45;
@@ -899,6 +969,20 @@ struct Candidate {
     action: Action,
 }
 
+/// "Agora: Daily (até 10:15). Próxima: 1:1 às 14:00."
+fn agenda_line(agenda: &[CalEvent], now: u64) -> Option<String> {
+    let current = current_event(agenda, now).filter(|e| e.start <= now);
+    let next = agenda.iter().find(|e| e.start > now);
+    let mut parts = Vec::new();
+    if let Some(e) = current {
+        parts.push(format!("Na agenda agora: {} (até {}).", e.title, local_hm(e.end)));
+    }
+    if let Some(e) = next {
+        parts.push(format!("Próximo evento: {} às {}.", e.title, local_hm(e.start)));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 fn context_of(s: &State, now: u64) -> WorkContext {
     let git = s.work.git.clone().unwrap_or_default();
     let recent = now.saturating_sub(s.work.last) < 2 * 3600;
@@ -918,6 +1002,7 @@ fn context_of(s: &State, now: u64) -> WorkContext {
         subjects: if recent { git.subjects } else { Vec::new() },
         call: s.call.as_ref().map(|c| c.name.clone()),
         pending,
+        agenda: agenda_line(&s.agenda, now),
     }
 }
 
@@ -1117,7 +1202,32 @@ mod tests {
     }
 
     fn ev(kind: &str) -> MindEvent {
-        MindEvent { kind: kind.into(), bundle: None, name: None, idle: None, running: None, secs: None }
+        MindEvent { kind: kind.into(), bundle: None, name: None, idle: None, running: None, secs: None, events: None }
+    }
+
+    #[test]
+    fn agenda_avisa_antes_e_da_nome_a_chamada() {
+        let m = mind();
+        let now = now();
+        let mut e = ev("calendar");
+        e.events = Some(vec![
+            CalEvent { title: "Daily".into(), start: now + 300, end: now + 1200 },
+            CalEvent { title: "Antiga".into(), start: now - 7200, end: now - 3600 },
+        ]);
+        m.events(vec![e, MindEvent { idle: Some(0.0), ..ev("presence") }]);
+        m.tick();
+        let i = m.brief().initiative.expect("aviso da reunião");
+        assert_eq!(i.kind, "agenda");
+        assert!(i.text.contains("Daily"));
+        assert!(m.summary().contains("Próximo evento: Daily"));
+        assert!(m.decline(&i.id));
+        m.tick();
+        assert!(m.brief().initiative.is_none(), "avisa uma vez só");
+        let mut call = ev("call_start");
+        call.bundle = Some("us.zoom.xos".into());
+        call.name = Some("Zoom".into());
+        m.events(vec![call]);
+        assert!(m.brief().initiative.unwrap().text.contains("reunião \"Daily\" no Zoom"));
     }
 
     #[test]

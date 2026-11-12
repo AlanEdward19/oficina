@@ -235,6 +235,14 @@ async fn hardware_get(State(app): State<App>, Path(id): Path<String>) -> Respons
     }
 }
 
+async fn hardware_diagram(State(app): State<App>, Path(id): Path<String>) -> Response {
+    let Some(p) = app.engine.hardware.get(&id) else { return StatusCode::NOT_FOUND.into_response() };
+    match hardware::diagram_of(&app.engine.hardware.root.join(&p.id)) {
+        Some(d) => Json(d).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
 async fn hardware_delete(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
     if app.engine.delete_hardware(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
 }
@@ -258,6 +266,7 @@ async fn hardware_run(State(app): State<App>, Path((id, what)): Path<(String, St
         "sim" => hardware::simulate(&dir).map(|(_, md)| md),
         "build" => hardware::build(&root, &dir),
         "erc" => hardware::erc(&root, &dir),
+        "firmware" => hardware::firmware(&root, &dir),
         _ => Err("ação desconhecida".into()),
     })
     .await
@@ -584,6 +593,7 @@ async fn main() {
         .route("/v1/hardware/setup", post(hardware_setup))
         .route("/v1/hardware/{id}", get(hardware_get).delete(hardware_delete))
         .route("/v1/hardware/{id}/run/{what}", post(hardware_run))
+        .route("/v1/hardware/{id}/diagram", get(hardware_diagram))
         .route("/v1/usage", get(usage))
         .route("/v1/usage/refresh", post(usage_refresh))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));

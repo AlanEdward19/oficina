@@ -215,7 +215,7 @@ private struct HardwareDetail: View {
                 case "simulacao": ScrollView { simulation.padding(40) }
                 case "pecas": ScrollView { parts.padding(40) }
                 case "eletrica": ScrollView { electrical.padding(40) }
-                case "firmware": ScrollView { folder("firmware").padding(40) }
+                case "firmware": ScrollView { firmwareTab.padding(40) }
                 default: ScrollView { document(tab == "pesquisa" ? "pesquisa.md" : tab == "montagem" ? "montagem.md" : "requisitos.md").padding(40) }
                 }
             }
@@ -291,13 +291,29 @@ private struct HardwareDetail: View {
         VStack(alignment: .leading, spacing: 22) {
             if let d = read("eletrica/diagrama.mmd") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Diagrama de blocos (Mermaid)").font(.system(size: 13, weight: .semibold))
-                    Text(d).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                    Text("Diagrama de blocos").font(.system(size: 13, weight: .semibold))
+                    DiagramPanel(core: core, project: project.id, source: d, tint: tint)
                 }
             }
             document("eletrica/mapa.md")
             files(project.files.filter { $0.hasPrefix("eletrica/") && !$0.hasSuffix(".md") && !$0.hasSuffix(".mmd") })
             runButton("erc", "Checar o esquemático")
+        }
+    }
+
+    private var firmwareTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            folder("firmware")
+            if let fw = project.report?.checks.first(where: { $0.nome == "Firmware" }) {
+                Text("\(fw.valor) · \(fw.detalhe)").font(.callout)
+            }
+            if let log = read("simulacoes/uart.log"), !log.isEmpty {
+                Text("Serial simulada").font(.system(size: 13, weight: .semibold))
+                Text(String(log.suffix(3000))).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+            }
+            runButton("firmware", "Compilar e simular")
+            Text("Compila com PlatformIO e, se houver firmware/renode.resc, simula no Renode (placas Cortex-M e RISC-V). O ESP32-S3 só compila.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -576,5 +592,151 @@ struct ModelView: NSViewRepresentable {
         v.scene = scene
         v.pointOfView = camera
         c.loaded = urls
+    }
+}
+
+// MARK: Diagrama de blocos
+
+struct DiagramNode: Decodable, Equatable {
+    let id: String
+    let label: String
+    let layer: Int
+    let row: Int
+    let shape: String
+}
+
+struct DiagramEdge: Decodable, Equatable {
+    let from: String
+    let to: String
+    let label: String?
+    let dashed: Bool
+    let thick: Bool
+}
+
+/// O Mermaid do agente, já posicionado pelo core.
+struct BlockDiagram: Decodable, Equatable {
+    let direction: String
+    let nodes: [DiagramNode]
+    let edges: [DiagramEdge]
+    let layers: Int
+}
+
+/// Busca o desenho de novo quando o arquivo muda; sem desenho, mostra o texto.
+private struct DiagramPanel: View {
+    @ObservedObject var core: Core
+    let project: String
+    let source: String
+    var tint: Color
+    @State private var diagram: BlockDiagram?
+    @State private var showSource = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let d = diagram, !d.nodes.isEmpty {
+                ScrollView([.horizontal, .vertical]) {
+                    DiagramCanvas(diagram: d, tint: tint).padding(8)
+                }
+                .frame(minHeight: 220, maxHeight: 460)
+                Button(showSource ? "Esconder o Mermaid" : "Ver o Mermaid") { showSource.toggle() }.buttonStyle(QuietStyle(tint: tint))
+            }
+            if diagram == nil || showSource {
+                Text(source).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+            }
+        }
+        .task(id: source) { diagram = await core.hardwareDiagram(project) }
+    }
+}
+
+/// Blocos em camadas e setas, desenhados no Canvas: sem navegador.
+struct DiagramCanvas: View {
+    let diagram: BlockDiagram
+    var tint: Color
+
+    private let box = CGSize(width: 150, height: 54)
+    private let gap = CGSize(width: 70, height: 26)
+    private var horizontal: Bool { diagram.direction == "LR" }
+
+    private var size: CGSize {
+        let rows = (diagram.nodes.map(\.row).max() ?? 0) + 1
+        let layers = max(diagram.layers, 1)
+        let along = CGFloat(layers) * box.width + CGFloat(layers - 1) * gap.width
+        let across = CGFloat(rows) * box.height + CGFloat(rows - 1) * gap.height
+        if horizontal { return CGSize(width: along, height: across) }
+        return CGSize(width: CGFloat(rows) * box.width + CGFloat(rows - 1) * gap.height,
+                      height: CGFloat(layers) * box.height + CGFloat(layers - 1) * gap.width)
+    }
+
+    private func center(_ n: DiagramNode) -> CGPoint {
+        if horizontal {
+            return CGPoint(x: CGFloat(n.layer) * (box.width + gap.width) + box.width / 2,
+                           y: CGFloat(n.row) * (box.height + gap.height) + box.height / 2)
+        }
+        return CGPoint(x: CGFloat(n.row) * (box.width + gap.height) + box.width / 2,
+                       y: CGFloat(n.layer) * (box.height + gap.width) + box.height / 2)
+    }
+
+    var body: some View {
+        let nodes = Dictionary(diagram.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        Canvas { ctx, _ in
+            for e in diagram.edges {
+                guard let a = nodes[e.from], let b = nodes[e.to] else { continue }
+                let (p, q) = endpoints(center(a), center(b))
+                var path = Path()
+                path.move(to: p)
+                path.addLine(to: q)
+                let style = StrokeStyle(lineWidth: e.thick ? 2.4 : 1.2, dash: e.dashed ? [5, 4] : [])
+                ctx.stroke(path, with: .color(.secondary), style: style)
+                ctx.fill(arrowHead(from: p, to: q), with: .color(.secondary))
+                if let label = e.label {
+                    let mid = CGPoint(x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 - 9)
+                    ctx.draw(Text(label).font(.system(size: 10, weight: .medium)).foregroundStyle(tint), at: mid)
+                }
+            }
+            for n in diagram.nodes {
+                let c = center(n)
+                let rect = CGRect(x: c.x - box.width / 2, y: c.y - box.height / 2, width: box.width, height: box.height)
+                let shape: Path
+                switch n.shape {
+                case "circle": shape = Path(ellipseIn: rect)
+                case "round": shape = Path(roundedRect: rect, cornerRadius: box.height / 2)
+                case "diamond":
+                    var d = Path()
+                    d.move(to: CGPoint(x: rect.midX, y: rect.minY))
+                    d.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+                    d.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+                    d.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
+                    d.closeSubpath()
+                    shape = d
+                default: shape = Path(roundedRect: rect, cornerRadius: 6)
+                }
+                ctx.fill(shape, with: .color(Bench.canvas))
+                ctx.stroke(shape, with: .color(n.layer == 0 ? tint : Color.primary.opacity(0.45)), lineWidth: 1.2)
+                ctx.draw(Text(n.label).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.primary), in: rect.insetBy(dx: 8, dy: 6))
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .accessibilityLabel(diagram.edges.map { "\(nodes[$0.from]?.label ?? $0.from) para \(nodes[$0.to]?.label ?? $0.to)" }.joined(separator: ", "))
+    }
+
+    /// A seta sai da borda de um bloco e chega na borda do outro.
+    private func endpoints(_ a: CGPoint, _ b: CGPoint) -> (CGPoint, CGPoint) {
+        let dx = b.x - a.x, dy = b.y - a.y
+        let len = max(hypot(dx, dy), 1)
+        let ux = dx / len, uy = dy / len
+        let tx = ux == 0 ? CGFloat.infinity : (box.width / 2) / abs(ux)
+        let ty = uy == 0 ? CGFloat.infinity : (box.height / 2) / abs(uy)
+        let t = min(tx, ty) + 2
+        return (CGPoint(x: a.x + ux * t, y: a.y + uy * t), CGPoint(x: b.x - ux * t, y: b.y - uy * t))
+    }
+
+    private func arrowHead(from p: CGPoint, to q: CGPoint) -> Path {
+        let angle = atan2(q.y - p.y, q.x - p.x)
+        let size: CGFloat = 7
+        var path = Path()
+        path.move(to: q)
+        path.addLine(to: CGPoint(x: q.x - size * cos(angle - .pi / 7), y: q.y - size * sin(angle - .pi / 7)))
+        path.addLine(to: CGPoint(x: q.x - size * cos(angle + .pi / 7), y: q.y - size * sin(angle + .pi / 7)))
+        path.closeSubpath()
+        return path
     }
 }

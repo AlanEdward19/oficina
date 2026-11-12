@@ -1,6 +1,6 @@
 # Estudo: Faísca atenta ao trabalho e às chamadas
 
-Status: primeira versão implementada. Ficaram para depois: agenda (EventKit), memória por projeto e o `SpeechAnalyzer` do macOS 26 (hoje a transcrição usa o `SFSpeechRecognizer` no Mac). O que foi feito está em [ARQUITETURA.md](../ARQUITETURA.md#chamadas-e-reuniões).
+Status: implementado, incluindo agenda (EventKit) e o `SpeechAnalyzer` do macOS 26. Ficou para depois: memória por projeto. O que foi feito está em [ARQUITETURA.md](../ARQUITETURA.md#chamadas-e-reuniões).
 
 ## O ponto de partida
 

@@ -32,6 +32,7 @@ cat > "$out/Info.plist" <<'EOF'
   <key>NSMicrophoneUsageDescription</key><string>Com a sua permissão em cada chamada, a Faísca ouve sua voz para anotar a reunião. A transcrição é feita no Mac.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>A transcrição das reuniões é feita no próprio Mac, sem internet.</string>
   <key>NSAudioCaptureUsageDescription</key><string>Para anotar o que os outros dizem na chamada, a Faísca ouve só o áudio do app da chamada, nunca a tela.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key><string>Se você ligar "Usar a agenda", a Faísca lê só o título e o horário dos seus eventos para avisar antes das reuniões e dar nome às anotações.</string>
   <key>NSAppleEventsUsageDescription</key><string>A Oficina usa automação para esvaziar a Lixeira e trocar o modo escuro quando você pede.</string>
 </dict></plist>
 EOF

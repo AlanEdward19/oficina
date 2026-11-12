@@ -76,6 +76,7 @@ struct WorkContextData: Decodable {
     let subjects: [String]
     let call: String?
     let pending: [String]
+    let agenda: String?
 }
 
 struct NamedValue: Decodable {
@@ -418,6 +419,7 @@ struct MindView: View {
                 }
                 ForEach(c.subjects.prefix(3), id: \.self) { Text("· \($0)").font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                 if let call = c.call { Label("Em chamada no \(call)", systemImage: "phone").font(.callout) }
+                if let a = c.agenda { Label(a, systemImage: "calendar").font(.callout) }
                 ForEach(c.pending, id: \.self) { Label($0, systemImage: "exclamationmark.triangle").font(.callout) }
             }
             if let t = s.today { Text("Hoje: \(t)").font(.callout) }

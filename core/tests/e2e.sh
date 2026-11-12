@@ -284,6 +284,8 @@ check 'simula sem tokens' '5,85 h' "$(api -X POST http://127.0.0.1:7901/v1/hardw
 check 'relatório no projeto' 'Autonomia' "$(api http://127.0.0.1:7901/v1/hardware/$hid | py '[c["nome"] for c in d["report"]["checks"]]')"
 check 'linha de comando do agente' 'Veredito: passou' "$(cd "$hdir" && OFICINA_HOME="$tmp/a" "$bin" hw sim .)"
 check 'fora do projeto é recusado' 2 "$(cd "$tmp" && OFICINA_HOME="$tmp/a" "$bin" hw sim . >/dev/null 2>&1; echo $?)"
+check 'diagrama posicionado' "('Projeto', 1)" "$(api http://127.0.0.1:7901/v1/hardware/$hid/diagram | py '[(n["label"], n["layer"]) for n in d["nodes"]]')"
+check 'firmware sem projeto explica' 'platformio.ini' "$(api -X POST http://127.0.0.1:7901/v1/hardware/$hid/run/firmware | py 'd["output"]')"
 check 'build sem modelo explica' 'modelo.py' "$(api -X POST http://127.0.0.1:7901/v1/hardware/$hid/run/build | py 'd["output"]')"
 check 'apaga o projeto' 204 "$(api -o /dev/null -w '%{http_code}' -X DELETE http://127.0.0.1:7901/v1/hardware/$hid)"
 

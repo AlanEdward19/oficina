@@ -2,18 +2,130 @@ import AVFoundation
 import CoreAudio
 import Speech
 
+/// Uma fonte de áudio virando falas. Recebe áudio de threads de tempo real.
+protocol TranscriptionChannel: AnyObject, Sendable {
+    func append(_ buffer: AVAudioPCMBuffer)
+    /// Fecha o pedaço atual, se a técnica trabalha em pedaços.
+    func rotate()
+    func stop()
+}
+
+/// Converte o áudio para o formato que o reconhecedor pede.
+final class Resampler: @unchecked Sendable {
+    private let target: AVAudioFormat
+    private var converter: AVAudioConverter?
+
+    init(target: AVAudioFormat) {
+        self.target = target
+    }
+
+    func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard buffer.frameLength > 0 else { return nil }
+        if converter == nil || converter?.inputFormat != buffer.format {
+            converter = AVAudioConverter(from: buffer.format, to: target)
+        }
+        guard let converter else { return nil }
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * target.sampleRate / buffer.format.sampleRate) + 64
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
+        // O bloco pode ser @Sendable no SDK: nada de var capturada e alterada.
+        let fed = Fed()
+        var error: NSError?
+        converter.convert(to: out, error: &error) { _, status in
+            if fed.done {
+                status.pointee = .noDataNow
+                return nil
+            }
+            fed.done = true
+            status.pointee = .haveData
+            return buffer
+        }
+        return error == nil && out.frameLength > 0 ? out : nil
+    }
+}
+
+/// Escolhe o melhor reconhecedor no Mac: o `SpeechAnalyzer` do macOS 26,
+/// senão o `SFSpeechRecognizer` sem rede. Sem nenhum dos dois, nil.
+func makeTranscriptionChannel(who: String, onText: @escaping @Sendable (String, String) -> Void) async -> TranscriptionChannel? {
+    #if compiler(>=6.2)
+    if #available(macOS 26.0, *), let modern = await AnalyzerChannel.make(who: who, onText: onText) {
+        return modern
+    }
+    #endif
+    let legacy = SpeechChannel(who: who, onText: onText)
+    return legacy.isLocal ? legacy : nil
+}
+
+#if compiler(>=6.2)
+/// macOS 26: `SpeechAnalyzer` + `SpeechTranscriber`, no aparelho, em fluxo
+/// contínuo. Cada frase final vira uma fala.
+@available(macOS 26.0, *)
+final class AnalyzerChannel: TranscriptionChannel, @unchecked Sendable {
+    private let analyzer: SpeechAnalyzer
+    private let input: AsyncStream<AnalyzerInput>.Continuation
+    private let resampler: Resampler
+    private var reader: Task<Void, Never>?
+
+    static func make(who: String, onText: @escaping @Sendable (String, String) -> Void) async -> AnalyzerChannel? {
+        let wanted = Locale(identifier: "pt-BR").identifier(.bcp47)
+        let supported = await SpeechTranscriber.supportedLocales
+        guard let locale = supported.first(where: { $0.identifier(.bcp47) == wanted }) else { return nil }
+        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
+        do {
+            // O modelo do idioma é baixado uma vez pelo sistema e fica no Mac.
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                try await request.downloadAndInstall()
+            }
+            guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else { return nil }
+            let analyzer = SpeechAnalyzer(modules: [transcriber])
+            let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+            try await analyzer.start(inputSequence: stream)
+            let channel = AnalyzerChannel(analyzer: analyzer, input: continuation, format: format)
+            channel.reader = Task {
+                do {
+                    for try await result in transcriber.results where result.isFinal {
+                        let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !text.isEmpty { onText(who, text) }
+                    }
+                } catch {}
+            }
+            return channel
+        } catch {
+            return nil
+        }
+    }
+
+    private init(analyzer: SpeechAnalyzer, input: AsyncStream<AnalyzerInput>.Continuation, format: AVAudioFormat) {
+        self.analyzer = analyzer
+        self.input = input
+        resampler = Resampler(target: format)
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        guard let converted = resampler.convert(buffer) else { return }
+        input.yield(AnalyzerInput(buffer: converted))
+    }
+
+    func rotate() {}
+
+    func stop() {
+        input.finish()
+        let analyzer = self.analyzer
+        Task { try? await analyzer.finalizeAndFinishThroughEndOfInput() }
+    }
+}
+#endif
+
 /// Transcreve uma fonte de áudio em pedaços. Cada pedido de reconhecimento dura
 /// até 25 s; quando termina, o texto final vira uma fala na reunião.
 /// Recebe áudio de threads de tempo real, por isso cuida da própria trava.
-final class SpeechChannel: @unchecked Sendable {
+final class SpeechChannel: TranscriptionChannel, @unchecked Sendable {
     let who: String
     private let recognizer: SFSpeechRecognizer?
     private let onDevice: Bool
     private let lock = NSLock()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var tasks: [SFSpeechRecognitionTask] = []
-    private var converter: AVAudioConverter?
-    private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
+    private let resampler = Resampler(target: AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!)
     private let onText: @Sendable (String, String) -> Void
 
     init(who: String, onText: @escaping @Sendable (String, String) -> Void) {
@@ -51,7 +163,7 @@ final class SpeechChannel: @unchecked Sendable {
     }
 
     func append(_ buffer: AVAudioPCMBuffer) {
-        guard let converted = convert(buffer) else { return }
+        guard let converted = resampler.convert(buffer) else { return }
         lock.lock()
         request?.append(converted)
         lock.unlock()
@@ -63,29 +175,6 @@ final class SpeechChannel: @unchecked Sendable {
         request = nil
         lock.unlock()
         old?.endAudio()
-    }
-
-    private func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard buffer.frameLength > 0 else { return nil }
-        if converter == nil || converter?.inputFormat != buffer.format {
-            converter = AVAudioConverter(from: buffer.format, to: target)
-        }
-        guard let converter else { return nil }
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * target.sampleRate / buffer.format.sampleRate) + 64
-        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
-        // O bloco pode ser @Sendable no SDK: nada de var capturada e alterada.
-        let fed = Fed()
-        var error: NSError?
-        converter.convert(to: out, error: &error) { _, status in
-            if fed.done {
-                status.pointee = .noDataNow
-                return nil
-            }
-            fed.done = true
-            status.pointee = .haveData
-            return buffer
-        }
-        return error == nil && out.frameLength > 0 ? out : nil
     }
 }
 
@@ -182,8 +271,8 @@ final class CallListener {
     private(set) var meeting: String?
     private var engine: AVAudioEngine?
     private var tap: AnyObject?
-    private var me: SpeechChannel?
-    private var others: SpeechChannel?
+    private var me: TranscriptionChannel?
+    private var others: TranscriptionChannel?
     private var rotation: Timer?
     var onChange: (Bool) -> Void = { _ in }
 
@@ -192,22 +281,21 @@ final class CallListener {
     }
 
     /// Devolve o motivo, se não deu para começar.
-    func start(app: CallWatcher.CallApp, processes: [AudioObjectID]) async -> String? {
+    func start(app: CallWatcher.CallApp, processes: [AudioObjectID], title: String = "") async -> String? {
         guard !active else { return nil }
         let speech = await withCheckedContinuation { (c: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
             SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) }
         }
         guard speech == .authorized else { return "Preciso da permissão de Reconhecimento de Fala, em Ajustes do Sistema > Privacidade." }
         guard await AVCaptureDevice.requestAccess(for: .audio) else { return "Preciso da permissão do Microfone, em Ajustes do Sistema > Privacidade." }
-        guard let id = await core.startMeeting(app: app.name, title: "") else { return "Não consegui falar com o core." }
+        guard let id = await core.startMeeting(app: app.name, title: title) else { return "Não consegui falar com o core." }
         meeting = id
 
         let send: @Sendable (String, String) -> Void = { [weak core] who, text in
             let at = UInt64(Date().timeIntervalSince1970)
             Task { @MainActor in core?.appendMeeting(id, [["who": who, "text": text, "at": at]]) }
         }
-        let mine = SpeechChannel(who: "Você", onText: send)
-        guard mine.isLocal else {
+        guard let mine = await makeTranscriptionChannel(who: "Você", onText: send) else {
             core.endMeeting(id)
             meeting = nil
             return "O reconhecimento de fala em português não está disponível no Mac. Baixe o idioma em Ajustes > Teclado > Ditado."
@@ -229,8 +317,8 @@ final class CallListener {
         self.engine = engine
 
         var note: String?
-        if #available(macOS 14.2, *), !processes.isEmpty {
-            let theirs = SpeechChannel(who: "Outros", onText: send)
+        let theirs = processes.isEmpty ? nil : await makeTranscriptionChannel(who: "Outros", onText: send)
+        if #available(macOS 14.2, *), let theirs {
             let t = ProcessTap()
             do {
                 try t.start(processes: processes) { theirs.append($0) }
