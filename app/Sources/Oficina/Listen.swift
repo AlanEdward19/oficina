@@ -194,9 +194,9 @@ final class ProcessTap {
     enum TapError: Error { case failed(String, OSStatus) }
 
     func start(processes: [AudioObjectID], onBuffer: @escaping (AVAudioPCMBuffer) -> Void) throws {
-        let description = CATapDescription(stereoMixdownOfProcesses: processes.map { NSNumber(value: $0) })
+        let description = CATapDescription(stereoMixdownOfProcesses: processes)
         description.uuid = UUID()
-        description.muteBehavior = .unmuted
+        description.muteBehavior = CATapMuteBehavior.unmuted
         description.isPrivate = true
         var tap = unknownAudioObject
         var err = AudioHardwareCreateProcessTap(description, &tap)
