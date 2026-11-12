@@ -73,19 +73,24 @@ final class SpeechChannel: @unchecked Sendable {
         guard let converter else { return nil }
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * target.sampleRate / buffer.format.sampleRate) + 64
         guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
-        var fed = false
+        // O bloco pode ser @Sendable no SDK: nada de var capturada e alterada.
+        let fed = Fed()
         var error: NSError?
         converter.convert(to: out, error: &error) { _, status in
-            if fed {
+            if fed.done {
                 status.pointee = .noDataNow
                 return nil
             }
-            fed = true
+            fed.done = true
             status.pointee = .haveData
             return buffer
         }
         return error == nil && out.frameLength > 0 ? out : nil
     }
+}
+
+private final class Fed: @unchecked Sendable {
+    var done = false
 }
 
 /// Ouve só os processos do app da chamada, sem gravar a tela.
@@ -100,7 +105,7 @@ final class ProcessTap {
     enum TapError: Error { case failed(String, OSStatus) }
 
     func start(processes: [AudioObjectID], onBuffer: @escaping (AVAudioPCMBuffer) -> Void) throws {
-        let description = CATapDescription(stereoMixdownOfProcesses: processes)
+        let description = CATapDescription(stereoMixdownOfProcesses: processes.map { NSNumber(value: $0) })
         description.uuid = UUID()
         description.muteBehavior = .unmuted
         description.isPrivate = true

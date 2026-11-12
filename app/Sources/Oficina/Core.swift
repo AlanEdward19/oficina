@@ -154,7 +154,7 @@ final class Core: ObservableObject {
                 loadSettings()
                 _ = await loadFactory()
                 if let s = await mindSnapshot() {
-                    mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit, decor: s.decor)
+                    mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit, decor: s.decor, call: s.context?.call)
                 }
                 try await listen()
             } catch {
