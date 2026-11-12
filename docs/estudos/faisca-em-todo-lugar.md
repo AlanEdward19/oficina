@@ -1,9 +1,52 @@
-# Estudo: a Faísca como agentic OS compacto (2027)
+# Estudo: a Faísca em todo lugar (2027)
 
 Status: proposta. Nada aqui está implementado.
 
-A pergunta: o que a Faísca precisa ter para ser, em 2027, a camada de agentes do computador, e não só uma
-assistente do Mac? A mesma coisa em macOS, Windows e Linux.
+"Agentic OS" aqui não quer dizer trocar o macOS. Quer dizer que a Faísca é **independente do sistema**: o mesmo
+core roda no Mac, no Windows, no Linux, num servidor ou num contêiner na nuvem, **percebe onde está ligada** e
+ajusta o que pode fazer e como fala com você. A referência mais próxima é o [Orca](https://orca.dev/docs/ways-to-run)
+(Stably AI): um runtime que roda no desktop, numa máquina por SSH, num servidor ou numa VM na nuvem, com interface
+no desktop e no celular, e um CLI (`orca`) que os próprios agentes usam para falar com o runtime em execução.
+
+## 0. Saber onde está ligada (P0)
+
+A cada início, e quando algo muda, o core monta um **retrato do lugar** e o guarda como manifesto de
+capacidades. É o que o cérebro e as missões consultam antes de prometer qualquer coisa.
+
+| Pergunta | Como descobrir | Muda o quê |
+|---|---|---|
+| Qual sistema e qual máquina? | `cfg!(target_os)`, nome do host, arquitetura, Apple Silicon ou não | Quais sentidos e telas existem |
+| Tem tela e alguém na frente? | Sessão gráfica (WindowServer, `DISPLAY`/`WAYLAND_DISPLAY`, sessão interativa do Windows) e tempo sem mexer | Com tela: pet e balões. Sem tela: só CLI, notificação ou celular |
+| Estou num contêiner, numa VM ou na nuvem? | `/.dockerenv`, `/proc/1/cgroup`, variáveis de sessão remota, metadados da nuvem | Na nuvem: sem microfone nem pet; vira trabalhador das missões |
+| Entrei por SSH? | `SSH_CONNECTION`, `SSH_TTY` | A interface fica na sua máquina; aqui só roda trabalho |
+| Estou dentro de um editor ou de outro agente? | `TERM_PROGRAM`, `VSCODE_*`, `CURSOR_*`, variáveis do JetBrains, `CLAUDECODE`, `AI_AGENT` e afins (a ideia do `@vercel/detect-agent`), tmux, terminal do Orca | Dentro de outro agente, ela vira ferramenta (MCP/CLI), não pet |
+| Quais agentes estão instalados? | Procurar no `PATH`: `claude`, `codex`, `gemini`, `qwen`, `cursor-agent`, `aider`, `goose`, `orca`… | A Fábrica oferece cada um como motor de agente, não só o Claude |
+| Quais sentidos existem? | Microfone, câmera, bateria, notch, agenda, acessibilidade, permissões já dadas | O manifesto diz o que ela pode perceber aqui |
+| Quem mais está ligado? | Máquinas conhecidas (já existe `GET /v1/machines`) e Tailscale | Onde mandar uma missão; onde você está agora |
+
+O manifesto vira `GET /v1/here` e entra no resumo do cérebro ("Estou num servidor Linux sem tela; o Mac do
+usuário está online"). As regras continuam: só nomes e contagens, nunca conteúdo de tela.
+
+## 1. Um runtime, vários clientes, um CLI de volta (P0)
+
+O desenho do Orca casa com o que a Oficina já tem (core separado da UI por HTTP/SSE):
+
+- **Runtime**: o `oficinad`, igual em todo lugar.
+- **Clientes**: o app do Mac (Swift), uma casca leve para Windows e Linux (Tauri), uma TUI para terminal e SSH, o
+  celular e uma página web local. Cada um mostra o que o lugar permite.
+- **CLI `faisca`** para quem está *dentro* da máquina, inclusive agentes:
+  `faisca diga "…"`, `faisca pergunte "posso apagar?"` (vira aprovação no seu celular ou no Mac),
+  `faisca missao "…"`, `faisca lembre "…"`, `faisca contexto --json`. Ele acha o runtime pela porta local ou pelo
+  socket e herda o projeto pela pasta atual, como o `orca --worktree active`.
+- **Pareamento**: um runtime numa máquina remota pareia com o seu Mac (código curto ou QR), e você vê e aprova tudo
+  de um lugar só.
+
+## 2. Uma Faísca, várias máquinas (P1)
+
+- **Identidade única**: a mesma personalidade, roupinhas e memória em todas as máquinas; o estado pessoal fica numa
+  máquina "casa" (o Mac) e as outras pedem o que precisam.
+- **Ela vai aonde você está**: a máquina com você na frente mostra o pet; as outras ficam quietas e trabalhando.
+- **Missões migram**: começa no Mac, continua num servidor com GPU ou na nuvem, e o resultado volta.
 
 ## Onde o mercado está (fim de 2026)
 
@@ -29,7 +72,7 @@ assistente do Mac? A mesma coisa em macOS, Windows e Linux.
 - Roteamento de modelo por custo, missões com etapas e veredito com evidência, aprovação antes de agir,
   ferramentas restritas por agente (`oficinad hw` é o modelo disso), contexto de trabalho sem ler a tela.
 
-O que falta para virar "OS de agentes" cabe em sete blocos.
+Além dos blocos 0 a 2 acima, o resto cabe em sete blocos.
 
 ## As features
 
@@ -105,13 +148,15 @@ Prioridade: **P0** = sem isso não é agentic OS; **P1** = diferencial forte; **
 
 ## Por onde começar (proposta de ordem)
 
-1. **Core em Linux e Windows no CI** e camada de plataforma no Rust. Barato, e destrava todo o resto.
-2. **Segurança base**: espaço isolado por agente, proxy com lista de permissões, cofre de credenciais e diário
+1. **Core em Linux e Windows no CI**, camada de plataforma no Rust e o **retrato do lugar** (`GET /v1/here`).
+   Barato, e destrava todo o resto.
+2. **CLI `faisca`** e uma TUI, para ela já ser útil num servidor ou por SSH.
+3. **Segurança base**: espaço isolado por agente, proxy com lista de permissões, cofre de credenciais e diário
    de auditoria. Precisa vir antes de dar mais poder aos agentes.
-3. **MCP nos dois sentidos** e **gatilhos**. É o que transforma a Faísca de chat em sistema.
-4. **Memória por projeto + busca local + modelo local** no roteador.
-5. **Casca Tauri** para Windows e Linux, com o pet, a paleta e o painel de missões.
-6. Rotinas (caixa de entrada, reunião de ponta a ponta, guardião), voz e celular.
+4. **MCP nos dois sentidos** e **gatilhos**. É o que transforma a Faísca de chat em sistema.
+5. **Memória por projeto + busca local + modelo local** no roteador.
+6. **Casca Tauri** para Windows e Linux, com o pet, a paleta e o painel de missões.
+7. Rotinas (caixa de entrada, reunião de ponta a ponta, guardião), voz e celular.
 
 ## Riscos e decisões que são suas
 
@@ -128,6 +173,7 @@ Prioridade: **P0** = sem isso não é agentic OS; **P1** = diferencial forte; **
 
 - Windows: [Ignite 2025 — Windows at the frontier of work](https://blogs.windows.com/windowsexperience/2025/11/18/ignite-2025-windows-at-the-frontier-of-work/), [Petri: agent workspaces](https://petri.com/windows-11-agentic-computing-workspaces/), [Pureinfotech: agentes na barra de tarefas](https://pureinfotech.com/windows-11-ai-agent-support-taskbar-search/), [VentureBeat](https://venturebeat.com/ai/microsoft-remakes-windows-for-an-era-of-autonomous-ai-agents), [Windows Latest: riscos](https://windowslatest.com/2025/11/30/microsoft-says-ai-agents-are-risky-but-its-moving-ahead-with-the-plan-on-windows-11)
 - Apple: [What's new in macOS 26](https://developer.apple.com/macos/whats-new), [9to5Mac: MCP no 26.1 beta](https://9to5mac.com/2025/09/22/macos-tahoe-26-1-beta-1-mcp-integration/), [Apple Newsroom: ferramentas para desenvolvedores](https://www.apple.com/sa/newsroom/2025/06/apple-supercharges-its-tools-and-technologies-for-developers/)
+- Orca: [formas de rodar](https://orca.dev/docs/ways-to-run), [CLI](https://orca.dev/docs/cli/reference), [agentes suportados](https://orca.dev/docs/agents/supported), [celular](https://orca.dev/docs/mobile); [detect-agent (Vercel)](https://classic.yarnpkg.com/en/package/@vercel/detect-agent)
 - Projetos abertos: [OpenHuman](https://pasqualepillitteri.it/en/news/2704/openhuman-open-source-ai-agent-local-memory), [Bytebot](https://github.com/bytebot-ai/bytebot), [Kuse Cowork](https://themenonlab.blog/blog/kuse-cowork-open-source-desktop-ai-agent-rust-tauri), [Agentes de uso do computador em 2026](https://fazm.ai/blog/best-open-source-computer-use-agents-2026-local-desktop-control)
 - Protocolos: [Linux Foundation: A2A com 150+ organizações](https://linuxfoundation.org/press/a2a-protocol-surpasses-150-organizations-lands-in-major-cloud-platforms-and-sees-enterprise-production-use-in-first-year), [MCP vs A2A](https://pickaxe.co/post/mcp-vs-a2a-protocol)
 - Segurança: [Design patterns contra prompt injection (arXiv)](https://arxiv.org/pdf/2506.08837), [Frontier Model Forum: práticas de segurança para agentes](https://www.frontiermodelforum.org/uploads/2026/06/FMF-Issue-Brief-on-Emerging-Security-Practices-for-AI-Agents.pdf), [Docker: como proteger agentes](https://www.docker.com/blog/how-to-secure-ai-agents/), [SC World: tríade letal](https://www.scworld.com/native/operating-inside-the-lethal-trifecta-blast-radius-reduction-in-ai-agent-deployments)
