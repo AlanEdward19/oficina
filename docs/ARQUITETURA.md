@@ -162,3 +162,6 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
 4. **Pet com vida:** emoções e aprendizado no core, inspirados nas ideias do Pestinha.
 5. **Dispositivos:** rede via Tailscale, celular, painel touchscreen, Alexa.
 6. **Oficina de hardware:** ideia → pesquisa → protótipo → modelo 3D, com agentes especializados.
+
+Estudos em andamento: [Faísca atenta ao trabalho e às chamadas](estudos/contexto-e-chamadas.md) e
+[Oficina de hardware](estudos/oficina-de-hardware.md).
