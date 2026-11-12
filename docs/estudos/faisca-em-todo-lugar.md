@@ -65,13 +65,15 @@ a posse fala, anda e escuta; os outros mostram que ela saiu ("Fui à sala chamar
 3. Lá ela fala, ouve a resposta e conta para você onde você estiver (mensagem ou voz, quando voltar).
 4. Ela volta sozinha ao terminar, ou fica se alguém continuar a conversa.
 
-**Ocupada em outro lugar.** Se ela está conversando por voz com alguém na sala e você a chama no Mac, ela
-escolhe uma destas, nesta ordem de preferência ajustável:
+**Ocupada em outro lugar.** Se ela está conversando por voz com alguém na sala e você a chama no Mac, ela **pesa a
+importância da conversa** (alguém pediu algo que ela está fazendo? está no meio de uma explicação? é papo?) contra a
+do seu chamado, e escolhe uma das saídas abaixo. **Você sempre pode forçar**: "vem agora", "urgente" ou o botão
+"Chamar já" fazem ela se despedir educadamente e vir na hora, seja qual for a conversa.
 
 | Situação | O que ela faz |
 |---|---|
 | Conversa quase no fim | Avisa a pessoa ("O Alan está me chamando, já volto"), termina e vem |
-| Você marcou como urgente, ou é o dono chamando e a conversa é casual | Dá tchau e vem na hora |
+| Você forçou ("vem agora", "urgente", "Chamar já"), ou a conversa é casual | Dá tchau e vem na hora |
 | Conversa importante (alguém pediu algo que ela está fazendo) | Fica e te manda mensagem: "Tô com a Ana na sala, termino em uns 2 min" |
 | Você só quer uma resposta rápida | Responde por mensagem sem sair de lá: texto não é presença, então não quebra a regra |
 
