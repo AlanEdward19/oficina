@@ -22,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var hotKey: EventHotKeyRef?
     private var clipKey: EventHotKeyRef?
     let tools = Tools()
+    private let calls = CallWatcher()
+    private var listener: CallListener!
 
     func applicationDidFinishLaunching(_ note: Notification) {
         if CommandLine.arguments.contains("--testar-dock-sistema") {
@@ -37,6 +39,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pet.onEvent = { [weak self] kind in self?.core.mindEvents([["kind": kind]]) }
         bubble = BubbleController(anchor: pet.window)
         bubble.model.answer = { [weak self] initiative, accepted in self?.answer(initiative, accepted) }
+        bubble.model.never = { [weak self] initiative in
+            self?.bubble.ask(nil)
+            self?.core.never(initiative.id)
+        }
         pet.busy = { [weak self] in self?.bubble.model.initiative != nil }
         pet.view.onMenu = { [weak self] event in self?.showMenu(event) }
         let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Oficina")
@@ -85,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .sink { [weak self] s in
                 MainActor.assumeIsolated {
                     FaiscaAvatar.bodyColor = colorFromHex(s.body_color)
+                    AppDelegate.bodyHex = s.body_color
                     FaiscaAvatar.sparkColor = colorFromHex(s.spark_color)
                     self?.pet.figure.customize(s)
                     self?.mindPanel?.title = "Mente de \(s.name)"
@@ -97,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .sink { [weak self] brief in MainActor.assumeIsolated { self?.mindChanged(brief) } }
             .store(in: &bag)
         watchPresence()
+        watchCalls()
         core.start()
         if CommandLine.arguments.contains("--abrir-mente") { openMind() }
         if CommandLine.arguments.contains("--abrir-fabrica") {
@@ -104,6 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.openFactory() }
         }
         if CommandLine.arguments.contains("--abrir-limpeza") { openCleaner() }
+        if CommandLine.arguments.contains("--abrir-hardware") { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.openHardware() } }
+        if CommandLine.arguments.contains("--abrir-reunioes") { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.openMeetings() } }
         if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--abrir-barra") }) {
             if let tab = arg.split(separator: "=").dropFirst().first { tools.tab = String(tab) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showBarPanel() }
@@ -201,6 +211,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.reportPresence(includeFocus: true) }
     }
 
+    // MARK: Chamadas
+
+    /// Percebe chamadas pelo microfone e, se você deixar, ouve e anota.
+    private func watchCalls() {
+        listener = CallListener(core: core)
+        listener.onChange = { [weak self] on in
+            guard let self else { return }
+            self.pet.wear(on ? Self.withHeadset(self.lastBrief?.outfit) : self.lastBrief?.outfit)
+        }
+        calls.onStart = { [weak self] app in
+            self?.core.mindEvents([["kind": "call_start", "bundle": app.bundle, "name": app.name]])
+        }
+        calls.onEnd = { [weak self] _ in
+            self?.core.mindEvents([["kind": "call_end"]])
+            if self?.listener.active == true {
+                self?.listener.stop()
+                self?.pet.say("A chamada acabou. Guardei as anotações.", force: true)
+            }
+        }
+        calls.start()
+    }
+
+    /// Enquanto ouve, ela usa fones: dá para ver de longe que está ouvindo.
+    private static func withHeadset(_ o: OutfitData?) -> OutfitData {
+        let none = OutfitPiece(shape: "none", color: "#333333")
+        return OutfitData(
+            id: "ouvindo", name: o?.name ?? "Ouvindo", theme: o?.theme ?? "", body: o?.body ?? AppDelegate.bodyHex,
+            head: OutfitPiece(shape: "headset", color: "#222222"),
+            face: o?.face ?? none, neck: o?.neck ?? none,
+            badge: OutfitPiece(shape: "REC", color: "#E5484D"), prop: o?.prop ?? "none"
+        )
+    }
+
+    private static var bodyHex = "#FF9E29"
+
+    private func listen(_ i: InitiativeData) {
+        guard let app = calls.current else {
+            pet.say("A chamada já acabou.", force: true)
+            return
+        }
+        let processes = calls.processObjects(of: app)
+        Task {
+            if let note = await listener.start(app: app, processes: processes) {
+                pet.say(note, force: true)
+            } else {
+                pet.say("Tô ouvindo e anotando. Para parar, clique com o botão direito em mim.", force: true)
+            }
+        }
+    }
+
+    @objc private func stopListening() {
+        listener.stop()
+        pet.say("Parei de ouvir.", force: true)
+    }
+
     private func reportPresence(includeFocus: Bool = false) {
         let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
         let running = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap(\.bundleIdentifier)
@@ -218,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let brief else { return }
         defer { lastBrief = brief }
         pet.setMind(brief.mood, sleeping: brief.sleeping)
-        if brief.outfit != lastBrief?.outfit { pet.wear(brief.outfit) }
+        if brief.outfit != lastBrief?.outfit { pet.wear(listener?.active == true ? Self.withHeadset(brief.outfit) : brief.outfit) }
         if let d = brief.decor, d != lastBrief?.decor { pet.figure.setDecor(d) }
         if brief.initiative != lastBrief?.initiative {
             if let i = brief.initiative {
@@ -256,6 +321,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 pet.say("Já volto com a roupa nova!", force: true)
             case "task":
                 pet.say("Mandei um agente pesquisar. Te aviso.", force: true)
+            case "listen":
+                listen(done)
+            case "summarize":
+                pet.say("Resumindo a reunião. O resumo aparece no chat.", force: true)
             default:
                 break
             }
@@ -315,6 +384,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func openFactory() {
         openTool("fabrica", title: "Fábrica", size: NSSize(width: 920, height: 640), FactoryView(core: core) { [weak self] conv in
+            self?.core.select(conv)
+            self?.openChat()
+        })
+    }
+
+    @objc private func openMeetings() {
+        openTool("reunioes", title: "Reuniões", size: NSSize(width: 860, height: 600), MeetingsView(core: core, tint: colorFromHex(core.settings.body_color)))
+    }
+
+    @objc private func openHardware() {
+        openTool("hardware", title: "Oficina de hardware", size: NSSize(width: 1040, height: 680), HardwareView(core: core, tint: colorFromHex(core.settings.body_color)) { [weak self] conv in
             self?.core.select(conv)
             self?.openChat()
         })
@@ -528,9 +608,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let bed = NSMenuItem(title: "Colocar para dormir", action: #selector(putToBed), keyEquivalent: "")
         bed.target = self
         menu.addItem(bed)
+        if listener?.active == true {
+            let stop = NSMenuItem(title: "Parar de ouvir a chamada", action: #selector(stopListening), keyEquivalent: "")
+            stop.target = self
+            menu.addItem(stop)
+        }
         let factory = NSMenuItem(title: "Fábrica de agentes…", action: #selector(openFactory), keyEquivalent: "")
         factory.target = self
         menu.addItem(factory)
+        let hardware = NSMenuItem(title: "Oficina de hardware…", action: #selector(openHardware), keyEquivalent: "")
+        hardware.target = self
+        menu.addItem(hardware)
+        let meetings = NSMenuItem(title: "Reuniões…", action: #selector(openMeetings), keyEquivalent: "")
+        meetings.target = self
+        menu.addItem(meetings)
         let cleaner = NSMenuItem(title: "Limpeza do Disco…", action: #selector(openCleaner), keyEquivalent: "")
         cleaner.target = self
         menu.addItem(cleaner)

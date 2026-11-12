@@ -461,4 +461,70 @@ final class Core: ObservableObject {
         let req = request("tasks/\(id)/\(action)", method: "POST")
         Task { _ = try? await session.data(for: req) }
     }
+
+    /// "Nunca no Zoom": recusa e não pergunta mais nesse app.
+    func never(_ id: String) {
+        Task { _ = await post("mind/initiatives/\(id)/never") }
+    }
+
+    // MARK: Reuniões
+
+    func startMeeting(app: String, title: String) async -> String? {
+        let data = await post("meetings", json: ["app": app, "title": title])
+        return data.flatMap { try? JSONDecoder().decode(MeetingData.self, from: $0) }?.id
+    }
+
+    func appendMeeting(_ id: String, _ segments: [[String: Any]]) {
+        guard !segments.isEmpty else { return }
+        Task { _ = await post("meetings/\(id)/segments", json: segments) }
+    }
+
+    func endMeeting(_ id: String) {
+        Task { _ = await post("meetings/\(id)/end") }
+    }
+
+    func meetings() async -> [MeetingItem] {
+        await get("meetings") ?? []
+    }
+
+    func meeting(_ id: String) async -> MeetingData? {
+        await get("meetings/\(id)")
+    }
+
+    /// Gasta tokens: quem chama já perguntou.
+    func summarizeMeeting(_ id: String) async -> Bool {
+        await post("meetings/\(id)/summarize") != nil
+    }
+
+    func deleteMeeting(_ id: String) async {
+        _ = try? await session.data(for: request("meetings/\(id)", method: "DELETE"))
+    }
+
+    // MARK: Oficina de hardware
+
+    func hardware() async -> HardwareOverview? {
+        await get("hardware")
+    }
+
+    func hardwareProject(_ id: String) async -> HardwareProject? {
+        await get("hardware/\(id)")
+    }
+
+    /// Devolve o erro em texto, ou nil se deu certo.
+    func createHardware(name: String, idea: String) async -> String? {
+        await factoryPost("hardware", ["name": name, "idea": idea])
+    }
+
+    func runHardware(_ id: String, _ what: String) async -> HardwareRun? {
+        let data = await post("hardware/\(id)/run/\(what)")
+        return data.flatMap { try? JSONDecoder().decode(HardwareRun.self, from: $0) }
+    }
+
+    func setupHardware() {
+        Task { _ = await post("hardware/setup") }
+    }
+
+    func deleteHardware(_ id: String) async {
+        await factoryDelete("hardware/\(id)")
+    }
 }

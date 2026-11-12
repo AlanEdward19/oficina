@@ -1,6 +1,6 @@
 # Estudo: a Oficina de hardware (modelador 3D)
 
-Status: proposta. É o item 6 do [Caminho](../ARQUITETURA.md#caminho): ideia → pesquisa → protótipo → modelo 3D.
+Status: primeira versão implementada (fases 1 a 4, sem Renode e sem térmica por FEM). O que foi feito está em [ARQUITETURA.md](../ARQUITETURA.md#oficina-de-hardware). É o item 6 do [Caminho](../ARQUITETURA.md#caminho): ideia → pesquisa → protótipo → modelo 3D.
 
 Exemplo do estudo inteiro: **"quero fazer um óculos com IA embutida, tipo os da Meta."**
 

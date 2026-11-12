@@ -29,6 +29,9 @@ cat > "$out/Info.plist" <<'EOF'
   <key>LSUIElement</key><true/>
   <key>CFBundleDevelopmentRegion</key><string>pt-BR</string>
   <key>CFBundleLocalizations</key><array><string>pt-BR</string><string>en</string></array>
+  <key>NSMicrophoneUsageDescription</key><string>Com a sua permissão em cada chamada, a Faísca ouve sua voz para anotar a reunião. A transcrição é feita no Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>A transcrição das reuniões é feita no próprio Mac, sem internet.</string>
+  <key>NSAudioCaptureUsageDescription</key><string>Para anotar o que os outros dizem na chamada, a Faísca ouve só o áudio do app da chamada, nunca a tela.</string>
   <key>NSAppleEventsUsageDescription</key><string>A Oficina usa automação para esvaziar a Lixeira e trocar o modo escuro quando você pede.</string>
 </dict></plist>
 EOF

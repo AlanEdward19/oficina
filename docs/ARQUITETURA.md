@@ -64,6 +64,11 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 | `GET/POST /v1/settings`, `GET /v1/factory` | Ajustes da assistente; agentes e equipes |
 | `POST /v1/agents`, `DELETE /v1/agents/{id}`, `POST …/missions`, `POST …/team` | Agentes e missões |
 | `POST /v1/teams`, `DELETE /v1/teams/{id}` | Equipes |
+| `GET /v1/meetings`, `POST /v1/meetings`, `GET/DELETE /v1/meetings/{id}` | Reuniões transcritas |
+| `POST /v1/meetings/{id}/segments`, `…/end`, `…/summarize` | Falas, fim e resumo (o resumo gasta tokens) |
+| `POST /v1/mind/initiatives/{id}/never` | "Nunca neste app" na pergunta da chamada |
+| `GET/POST /v1/hardware`, `GET/DELETE /v1/hardware/{id}` | Projetos da Oficina de hardware |
+| `POST /v1/hardware/{id}/run/{sim\|build\|erc}`, `POST /v1/hardware/setup` | Simular, modelar e checar sem tokens; instalar o CAD |
 | `GET /v1/events` | SSE com `{kind: task\|delta\|usage\|resync}` |
 
 ## Conversas
@@ -99,8 +104,13 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 
 Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
 
-- **Sentidos:** app em foco (só o nome), tempo sem mexer no Mac, tarefas, gestos no pet, troca de ambiente.
-  Nunca títulos de janela nem conteúdo de tela.
+- **Sentidos:** app em foco (só o nome), tempo sem mexer no Mac, tarefas, gestos no pet, troca de ambiente,
+  chamadas (qual app usa o microfone). Nunca títulos de janela nem conteúdo de tela.
+- **Contexto de trabalho** (`mind/context.rs`): a cada 2 minutos o core pega o projeto mais recente do Claude Code,
+  lê o git dele (branch, quantos arquivos sem commit, assuntos dos últimos commits, linguagens pelos nomes dos
+  arquivos) e, fora de `main`, o PR do branch com o `gh`, no máximo a cada 10 minutos. Por regras, sem tokens,
+  deduz a atividade (programando, revisando, reunião, lendo, pausa). Vai para o resumo do cérebro e para o
+  diário do dia (tempo por projeto e em reunião, só números).
 - **Rede:** 12 canais → 49 interneurônios de disparo (integra e dispara, com vazamento) → 7 impulsos
   (alegria, curiosidade, tédio, cansaço, carência, foco, iniciativa). Os pesos iniciais seguem afinidades
   desenhadas à mão; os pesos interneurônio → impulso aprendem por recompensa (carinho, iniciativas aceitas
@@ -112,6 +122,40 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
   (se o assunto é IA), abrir um app do seu horário, pausa depois de 1h30 de trabalho ou pesquisa na nuvem
   sobre um interesse. Um bandit aprende o que você aceita. Tudo que gasta tokens pergunta antes.
 - **Roupinhas:** o Claude escolhe peças de um vocabulário fixo e cores; o app só desenha o que é válido.
+- **Iniciativas de trabalho:** CI vermelho no PR do branch atual (oferece um agente para investigar), 2h sem commit
+  com arquivos alterados e o diário no fim do dia. Durante uma chamada nenhuma iniciativa aparece.
+
+## Chamadas e reuniões
+
+- **Detectar** (`Call.swift`): o Core Audio avisa quando o microfone padrão liga; enquanto ele está ligado, a cada
+  3 s o app lê os processos de áudio (`kAudioHardwarePropertyProcessObjectList`) e qual deles captura entrada.
+  O bundle do processo é comparado com uma lista de apps de chamada (Zoom, Discord, Teams, WhatsApp, FaceTime,
+  Slack, Webex, Skype) e navegadores (Meet). 10 s seguidos começam a chamada; 20 s sem ela, terminam.
+- **Perguntar:** o core cria a pergunta "Quer que eu ouça e anote?" com três respostas: Ouvir, Agora não e
+  "Nunca no Zoom", que fica guardado. Vale 60 s.
+- **Ouvir** (`Listen.swift`): o microfone (AVAudioEngine) vira "Você"; um *process tap* do Core Audio só nos processos
+  do app da chamada (macOS 14.2+, permissão "Gravação de áudio do sistema", não de tela) vira "Outros". Cada
+  fonte passa pelo `SFSpeechRecognizer` em português, no Mac (`requiresOnDeviceRecognition`); sem reconhecimento
+  local, ela não ouve. Pedaços de 25 s viram falas no core. O áudio nunca é gravado. Enquanto ouve, a
+  Faísca usa fones com um selo REC, e o menu dela ganha "Parar de ouvir a chamada".
+- **Guardar:** `reunioes/<id>.json`, com as falas. No fim da chamada ela oferece o resumo (decisões, tarefas e
+  dúvidas), que gasta tokens. "Esquecer tudo" apaga as reuniões.
+
+## Oficina de hardware
+
+- Cada projeto é uma pasta em `hardware/<id>/` com um esqueleto: `requisitos.md`, `pesquisa.md`,
+  `eletrica/diagrama.mmd` e `mapa.md`, `especificacao.json`, `mecanica/modelo.py`, `montagem.md`, `firmware/`.
+- Criar um projeto cria um agente `HW-<id>` com esse papel e começa a missão de quatro etapas. A etapa Executar
+  espera aprovação, como as outras missões.
+- O agente não tem shell livre: além das ferramentas da missão, só `oficinad hw sim|build|erc|bom`, que só roda
+  dentro de uma pasta de projeto. Nas etapas de leitura ele ganha também WebSearch, WebFetch e `hw sim`.
+- `hw sim` calcula, sem tokens e sem dependências, autonomia (bateria × margem ÷ corrente média dos modos), peso e
+  centro de massa, custo e calor (ΔT = P / (h · A)), e gera `simulacoes/resultado.md`, `resultado.json` e `bom.csv`.
+- `hw build` roda `mecanica/modelo.py` (build123d) num ambiente Python só da Oficina (`hardware/.env`,
+  instalado pela tela, cerca de 2 GB). O ajudante `oficina_cad.py` exporta um STL por peça, `montagem.step`, massa
+  pelo material e as interferências entre peças, que entram nas simulações como "Encaixe".
+- `hw erc` compila o esquemático com atopile ou roda o ERC do KiCad, se algum estiver instalado.
+- A tela mostra o pacote em abas e o modelo 3D em SceneKit (STL via ModelIO), com vista explodida.
 
 ## Dock
 
@@ -161,7 +205,7 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
    alternador de janelas, layout de janelas, mixer de áudio, captura de tela, limpeza.
 4. **Pet com vida:** emoções e aprendizado no core, inspirados nas ideias do Pestinha.
 5. **Dispositivos:** rede via Tailscale, celular, painel touchscreen, Alexa.
-6. **Oficina de hardware:** ideia → pesquisa → protótipo → modelo 3D, com agentes especializados.
+6. **Oficina de hardware** (primeira versão feita): ideia → pesquisa → protótipo → modelo 3D, com agentes especializados.
 
 Estudos em andamento: [Faísca atenta ao trabalho e às chamadas](estudos/contexto-e-chamadas.md) e
 [Oficina de hardware](estudos/oficina-de-hardware.md).
