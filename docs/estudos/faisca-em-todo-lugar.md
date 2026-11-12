@@ -48,6 +48,46 @@ O desenho do Orca casa com o que a Oficina já tem (core separado da UI por HTTP
 - **Ela vai aonde você está**: a máquina com você na frente mostra o pet; as outras ficam quietas e trabalhando.
 - **Missões migram**: começa no Mac, continua num servidor com GPU ou na nuvem, e o resultado volta.
 
+## 3. Uma Faísca só, que se move (P1)
+
+A regra: **existe uma Faísca**. Ela pode estar no Mac, no Windows, numa caixa de som da sala ou no celular, mas em
+um lugar de cada vez. Agentes da Fábrica são outra coisa: podem ser muitos e estar em vários lugares, cada um
+num lugar por vez.
+
+**Mente e corpo.** A mente (memória, humor, conversas) fica numa máquina "casa", o core do Mac. Cada dispositivo é
+um *corpo*: o pet no Mac ou no Windows, a voz numa caixa de som, a tela do celular. Quem está com a Faísca agora
+segura uma **posse de presença**: um token único no core da casa, renovado a cada poucos segundos. Só o corpo com
+a posse fala, anda e escuta; os outros mostram que ela saiu ("Fui à sala chamar a Ana").
+
+**Ir até outro lugar.** "Vai chamar a Ana na sala":
+1. A mente acha o corpo da sala no registro de dispositivos (cada um com cômodo, sentidos e se está online).
+2. No Mac, o pet sai andando pela borda da tela; a posse passa para a caixa de som da sala.
+3. Lá ela fala, ouve a resposta e conta para você onde você estiver (mensagem ou voz, quando voltar).
+4. Ela volta sozinha ao terminar, ou fica se alguém continuar a conversa.
+
+**Ocupada em outro lugar.** Se ela está conversando por voz com alguém na sala e você a chama no Mac, ela
+escolhe uma destas, nesta ordem de preferência ajustável:
+
+| Situação | O que ela faz |
+|---|---|
+| Conversa quase no fim | Avisa a pessoa ("O Alan está me chamando, já volto"), termina e vem |
+| Você marcou como urgente, ou é o dono chamando e a conversa é casual | Dá tchau e vem na hora |
+| Conversa importante (alguém pediu algo que ela está fazendo) | Fica e te manda mensagem: "Tô com a Ana na sala, termino em uns 2 min" |
+| Você só quer uma resposta rápida | Responde por mensagem sem sair de lá: texto não é presença, então não quebra a regra |
+
+A posse de presença é só para corpo e voz. Responder por texto, rodar missões e agentes continua em paralelo.
+
+**Que corpos dão para ter.**
+- **Pet no Mac, Windows e Linux**: presença completa.
+- **Celular**: presença por texto e voz quando o app está aberto; fora disso, notificação.
+- **Alexa**: um corpo limitado. Uma skill de terceiros não consegue fazer o Echo falar sozinha. O que a Amazon
+  oferece é notificação (o Echo toca um som e acende a luz, e a pessoa pede para ouvir) e, para dispositivos de casa
+  inteligente, anúncios falados com frases fixas ligadas a estados ("pronto", "travado"). Conversa só quando a pessoa
+  chama a skill ("Alexa, abre a Faísca"). Serve para "tem um recado para você", não para chamar alguém do nada.
+- **Caixa de som da Faísca** (projeto da Oficina de hardware): ESP32-S3, microfone, alto-falante e anel de LED,
+  falando com o core pela rede. É o único jeito de ter presença de voz completa na sala, com ela chegando, falando
+  e indo embora. É um bom primeiro projeto para a própria Oficina de hardware.
+
 ## Onde o mercado está (fim de 2026)
 
 - **Windows** virou "agentic OS" oficialmente: *agent workspace* (cada agente roda numa conta própria do Windows,
@@ -173,6 +213,7 @@ Prioridade: **P0** = sem isso não é agentic OS; **P1** = diferencial forte; **
 
 - Windows: [Ignite 2025 — Windows at the frontier of work](https://blogs.windows.com/windowsexperience/2025/11/18/ignite-2025-windows-at-the-frontier-of-work/), [Petri: agent workspaces](https://petri.com/windows-11-agentic-computing-workspaces/), [Pureinfotech: agentes na barra de tarefas](https://pureinfotech.com/windows-11-ai-agent-support-taskbar-search/), [VentureBeat](https://venturebeat.com/ai/microsoft-remakes-windows-for-an-era-of-autonomous-ai-agents), [Windows Latest: riscos](https://windowslatest.com/2025/11/30/microsoft-says-ai-agents-are-risky-but-its-moving-ahead-with-the-plan-on-windows-11)
 - Apple: [What's new in macOS 26](https://developer.apple.com/macos/whats-new), [9to5Mac: MCP no 26.1 beta](https://9to5mac.com/2025/09/22/macos-tahoe-26-1-beta-1-mcp-integration/), [Apple Newsroom: ferramentas para desenvolvedores](https://www.apple.com/sa/newsroom/2025/06/apple-supercharges-its-tools-and-technologies-for-developers/)
+- Alexa: [Proactive Events API](https://developer.amazon.com/en-GB/docs/alexa/smapi/proactive-events-api.html), [anúncios de dispositivos (ProactiveNotificationSource)](https://developer.Amazon.com/docs/device-apis/alexa-proactivenotificationsource.html), [notificações por luz e som](https://techcrunch.com/?p=1548591)
 - Orca: [formas de rodar](https://orca.dev/docs/ways-to-run), [CLI](https://orca.dev/docs/cli/reference), [agentes suportados](https://orca.dev/docs/agents/supported), [celular](https://orca.dev/docs/mobile); [detect-agent (Vercel)](https://classic.yarnpkg.com/en/package/@vercel/detect-agent)
 - Projetos abertos: [OpenHuman](https://pasqualepillitteri.it/en/news/2704/openhuman-open-source-ai-agent-local-memory), [Bytebot](https://github.com/bytebot-ai/bytebot), [Kuse Cowork](https://themenonlab.blog/blog/kuse-cowork-open-source-desktop-ai-agent-rust-tauri), [Agentes de uso do computador em 2026](https://fazm.ai/blog/best-open-source-computer-use-agents-2026-local-desktop-control)
 - Protocolos: [Linux Foundation: A2A com 150+ organizações](https://linuxfoundation.org/press/a2a-protocol-surpasses-150-organizations-lands-in-major-cloud-platforms-and-sees-enterprise-production-use-in-first-year), [MCP vs A2A](https://pickaxe.co/post/mcp-vs-a2a-protocol)
