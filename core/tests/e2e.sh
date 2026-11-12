@@ -245,6 +245,48 @@ check 'esquecer' 204 "$(api -o /dev/null -w '%{http_code}' -X POST http://127.0.
 equal 'sem fatos depois de esquecer' '[]' "$(mind | py 'd["memory"]["facts"]')"
 check 'roupinhas continuam guardadas' 'AI Engineer' "$(mind | py '[o["name"] for o in d["outfits"]]')"
 
+echo 'chamadas e reuniões'
+ev() { api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$1" http://127.0.0.1:7901/v1/mind/events; }
+check 'entrou em chamada' 204 "$(ev '[{"kind":"call_start","bundle":"us.zoom.xos","name":"Zoom"}]')"
+check 'pergunta se deve ouvir' 'Ouvir' "$(mind | py 'd["initiative"]["accept"]')"
+check 'oferece nunca neste app' 'Nunca no Zoom' "$(mind | py 'd["initiative"]["never"]')"
+check 'sabe da chamada' 'Zoom' "$(mind | py 'd["call"]')"
+lid=$(mind | py 'd["initiative"]["id"]')
+check 'nunca no Zoom' 204 "$(api -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7901/v1/mind/initiatives/$lid/never)"
+ev '[{"kind":"call_end"}]' >/dev/null
+ev '[{"kind":"call_start","bundle":"us.zoom.xos","name":"Zoom"}]' >/dev/null
+equal 'não pergunta de novo no Zoom' 'None' "$(mind | py 'd["initiative"]')"
+equal 'contexto em reunião' 'reunião' "$(sleep 1.2; mind | py 'd["context"]["activity"]')"
+ev '[{"kind":"call_end"}]' >/dev/null
+mid=$(api -X POST -H 'content-type: application/json' -d '{"app":"Teams","title":"Daily"}' http://127.0.0.1:7901/v1/meetings | py 'd["id"]')
+check 'grava falas' 204 "$(api -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '[{"who":"Você","text":"vamos lançar sexta","at":1},{"who":"Outros","text":"combinado","at":2}]' http://127.0.0.1:7901/v1/meetings/$mid/segments)"
+check 'fecha a reunião' 204 "$(api -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7901/v1/meetings/$mid/end)"
+check 'oferece o resumo' 'Resumir' "$(mind | py 'd["initiative"]["accept"]')"
+check 'lista as reuniões' 'Daily' "$(api http://127.0.0.1:7901/v1/meetings | py '[m["title"] for m in d]')"
+sid=$(api -X POST http://127.0.0.1:7901/v1/meetings/$mid/summarize | py 'd["id"]')
+check 'resumo termina' done "$(wait_for "$sid" done\ failed)"
+check 'resumo guardado' 'lançar sexta' "$(api http://127.0.0.1:7901/v1/meetings/$mid | py 'd["summary"] or ""')"
+check 'apaga a reunião' 204 "$(api -o /dev/null -w '%{http_code}' -X DELETE http://127.0.0.1:7901/v1/meetings/$mid)"
+
+echo 'oficina de hardware'
+hv=$(api -X POST -H 'content-type: application/json' -d '{"name":"Óculos com IA","idea":"câmera, microfone e IA pelo celular"}' http://127.0.0.1:7901/v1/hardware)
+hid=$(echo "$hv" | py 'd["id"]')
+equal 'projeto com nome seguro' 'oculos-com-ia' "$hid"
+check 'esqueleto do pacote' 'especificacao.json' "$(echo "$hv" | py 'd["files"]')"
+check 'agente da missão' 'HW-oculos-com-ia' "$(api http://127.0.0.1:7901/v1/factory | py '[a["name"] for a in d["agents"]]')"
+hdir="$tmp/a/hardware/$hid"
+cat > "$hdir/especificacao.json" <<'JSON'
+{"nome":"Óculos","requisitos":{"autonomia_h":4},"bateria":{"capacidade_mah":300},
+ "modos":[{"nome":"BLE","corrente_ma":20,"fracao":0.85},{"nome":"Wi-Fi","corrente_ma":200,"fracao":0.1},{"nome":"Áudio","corrente_ma":80,"fracao":0.05}],
+ "pecas":[{"nome":"XIAO ESP32-S3 Sense","massa_g":4,"preco_brl":120}]}
+JSON
+check 'simula sem tokens' '5,85 h' "$(api -X POST http://127.0.0.1:7901/v1/hardware/$hid/run/sim | py 'd["output"]')"
+check 'relatório no projeto' 'Autonomia' "$(api http://127.0.0.1:7901/v1/hardware/$hid | py '[c["nome"] for c in d["report"]["checks"]]')"
+check 'linha de comando do agente' 'Veredito: passou' "$(cd "$hdir" && OFICINA_HOME="$tmp/a" "$bin" hw sim .)"
+check 'fora do projeto é recusado' 2 "$(cd "$tmp" && OFICINA_HOME="$tmp/a" "$bin" hw sim . >/dev/null 2>&1; echo $?)"
+check 'build sem modelo explica' 'modelo.py' "$(api -X POST http://127.0.0.1:7901/v1/hardware/$hid/run/build | py 'd["output"]')"
+check 'apaga o projeto' 204 "$(api -o /dev/null -w '%{http_code}' -X DELETE http://127.0.0.1:7901/v1/hardware/$hid)"
+
 echo 'persistência'
 last=$(send '{"text":"guardar"}'); wait_for "$last" done >/dev/null; sleep 1.3
 kill "$pa"; wait "$pa" 2>/dev/null

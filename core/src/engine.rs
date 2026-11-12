@@ -2,10 +2,12 @@ use crate::{
     config::{Config, Paths, Peer},
     conv::Conversations,
     factory::{AgentSpec, Factory},
+    hardware::Hardware,
+    meeting::Meetings,
     clean::Cleaner,
     router::{AUTO, Need, Router},
     peer,
-    mind::{Action, Initiative, Mind, decor, outfit},
+    mind::{Action, Initiative, Mind, context, decor, outfit},
     route::{self, CliEvent, Dest, Holdback},
     store::{Event, Status, Store, Target, Task},
     usage::{self, Scanner, Usage},
@@ -57,6 +59,10 @@ pub struct Engine {
     scanner: Arc<Mutex<Scanner>>,
     refreshing: AtomicBool,
     pub mind: Arc<Mind>,
+    pub meetings: Meetings,
+    pub hardware: Hardware,
+    /// Última vez que o PR do branch atual foi consultado no GitHub.
+    pr_checked: Mutex<(String, u64, Option<context::FailingPr>)>,
 }
 
 #[derive(Serialize)]
@@ -171,6 +177,8 @@ impl Engine {
         let convs = Conversations::open(paths.home.join("conversas.json"));
         let factory = Factory::open(paths.home.join("fabrica.json"));
         let router = Router::open(paths.home.join("router.json"));
+        let meetings = Meetings::open(paths.home.join("reunioes"));
+        let hardware = Hardware::open(paths.home.join("hardware"));
         // Tarefas de antes das conversas vão para uma conversa própria.
         if let Some(first) = store.has_orphans() {
             let c = convs.create(Some("Conversas anteriores"), Some(first));
@@ -193,6 +201,9 @@ impl Engine {
             usage: Default::default(),
             scanner: Arc::new(Mutex::new(Scanner::new(claude_projects()))),
             refreshing: AtomicBool::new(false),
+            meetings,
+            hardware,
+            pr_checked: Mutex::new((String::new(), 0, None)),
         })
     }
 
@@ -439,6 +450,9 @@ impl Engine {
             Action::Task { text, target } => {
                 let _ = self.submit(text, *target, None, self.convs.current());
             }
+            Action::Summarize { meeting } => {
+                let _ = self.summarize_meeting(meeting);
+            }
             _ => {}
         }
         Some(initiative)
@@ -490,6 +504,87 @@ impl Engine {
             Err(e) => Err(e),
         };
         self.finish(id, result);
+    }
+
+    /// Resume uma reunião com o Claude. Quem chama já pediu permissão.
+    pub fn summarize_meeting(self: &Arc<Self>, id: &str) -> Result<Task, String> {
+        let m = self.meetings.get(id).ok_or("Essa reunião não existe.")?;
+        if m.segments.is_empty() {
+            return Err("A reunião não tem nada transcrito.".into());
+        }
+        let task = self.store.create(format!("Resumir reunião: {}", m.title), Target::Chat, None, self.convs.current());
+        let (me, tid, mid, prompt) = (self.clone(), task.id.clone(), m.id.clone(), m.summary_prompt());
+        tokio::spawn(async move {
+            if !me.start(&tid) {
+                return;
+            }
+            let result = me.ask(&prompt).await.map(|text| {
+                me.meetings.set_summary(&mid, text.clone());
+                Some(text)
+            });
+            me.finish(&tid, result);
+        });
+        Ok(task)
+    }
+
+    /// Fecha a reunião e, se houver texto, oferece o resumo.
+    pub fn end_meeting(&self, id: &str) -> bool {
+        let Some(m) = self.meetings.end(id, usage::now()) else { return false };
+        if !m.segments.is_empty() && m.summary.is_none() {
+            self.mind.offer_summary(&m.id, &m.title);
+        }
+        true
+    }
+
+    /// Lê o projeto mais recente, o git dele e, a cada 10 min, o PR do branch.
+    pub async fn refresh_context(self: &Arc<Self>) {
+        if !self.refreshing.swap(true, Ordering::SeqCst) {
+            self.refresh_usage(true, false).await;
+            self.refreshing.store(false, Ordering::SeqCst);
+        }
+        let project = self.usage.lock().unwrap().local.projects.iter().max_by_key(|p| p.last).cloned();
+        let Some(project) = project else { return };
+        let path = PathBuf::from(&project.path);
+        let recent = usage::now().saturating_sub(project.last) < 2 * 3600;
+        let git = if recent && path.is_dir() {
+            let p = path.clone();
+            tokio::task::spawn_blocking(move || context::git_info(&p)).await.ok().flatten()
+        } else {
+            None
+        };
+        let branch = git.as_ref().and_then(|g| g.branch.clone());
+        let failing = match branch.as_deref() {
+            Some(b) if !["main", "master", "develop"].contains(&b) => self.pr_status(&path, b).await,
+            _ => None,
+        };
+        self.mind.set_work(context::WorkInput {
+            project: Some(project.name.clone()),
+            path: Some(project.path.clone()),
+            last: project.last,
+            git,
+            failing,
+        });
+    }
+
+    async fn pr_status(&self, dir: &std::path::Path, branch: &str) -> Option<context::FailingPr> {
+        let key = format!("{}#{branch}", dir.display());
+        {
+            let c = self.pr_checked.lock().unwrap();
+            if c.0 == key && usage::now().saturating_sub(c.1) < 600 {
+                return c.2.clone();
+            }
+        }
+        let out = tokio::time::timeout(
+            Duration::from_secs(20),
+            Command::new(find_gh()).current_dir(dir).args(["pr", "view", "--json", "number,url,statusCheckRollup"]).stdin(Stdio::null()).kill_on_drop(true).output(),
+        )
+        .await;
+        let failing = match out {
+            Ok(Ok(o)) if o.status.success() => context::failing_pr(&String::from_utf8_lossy(&o.stdout)),
+            _ => None,
+        };
+        *self.pr_checked.lock().unwrap() = (key, usage::now(), failing.clone());
+        failing
     }
 
     /// Uma pergunta avulsa ao Claude, sem ferramentas e sem conversa.
@@ -1004,6 +1099,7 @@ const CLOUD_SETUP: &str = "Falta configurar o Claude CLI para a nuvem. No termin
 
 const GRACE: Duration = Duration::from_secs(2);
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t) -> libc::size_t;
 }
@@ -1011,6 +1107,7 @@ unsafe extern "C" {
 /// Ler 1 GB de logs deixa buffers livres retidos pelo alocador; devolve ao sistema.
 fn release_memory() {
     // SAFETY: zona nula = todas as zonas; objetivo 0 = liberar o que puder.
+    #[cfg(target_os = "macos")]
     unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
 }
 

@@ -3,6 +3,8 @@ mod config;
 mod conv;
 mod engine;
 mod factory;
+mod hardware;
+mod meeting;
 mod mind;
 mod peer;
 mod route;
@@ -154,9 +156,116 @@ async fn initiative_decline(State(app): State<App>, Path(id): Path<String>) -> S
     if app.engine.mind.decline(&id) { StatusCode::NO_CONTENT } else { StatusCode::CONFLICT }
 }
 
+async fn initiative_never(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.mind.never(&id) { StatusCode::NO_CONTENT } else { StatusCode::CONFLICT }
+}
+
 async fn mind_forget(State(app): State<App>) -> StatusCode {
     app.engine.mind.forget();
+    app.engine.meetings.forget();
     StatusCode::NO_CONTENT
+}
+
+// MARK: Reuniões
+
+async fn meetings(State(app): State<App>) -> impl IntoResponse {
+    Json(app.engine.meetings.list())
+}
+
+#[derive(Deserialize)]
+struct NewMeeting {
+    app: String,
+    #[serde(default)]
+    title: String,
+}
+
+async fn meeting_create(State(app): State<App>, Json(m): Json<NewMeeting>) -> Response {
+    (StatusCode::CREATED, Json(app.engine.meetings.start(&m.app, &m.title, usage::now()))).into_response()
+}
+
+async fn meeting_get(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.meetings.get(&id) {
+        Some(m) => Json(m).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn meeting_delete(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.meetings.delete(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+async fn meeting_segments(State(app): State<App>, Path(id): Path<String>, Json(s): Json<Vec<meeting::Segment>>) -> StatusCode {
+    if app.engine.meetings.append(&id, s) { StatusCode::NO_CONTENT } else { StatusCode::CONFLICT }
+}
+
+async fn meeting_end(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.end_meeting(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+async fn meeting_summarize(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.summarize_meeting(&id) {
+        Ok(task) => (StatusCode::CREATED, Json(task)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+// MARK: Oficina de hardware
+
+async fn hardware_list(State(app): State<App>) -> impl IntoResponse {
+    Json(app.engine.hardware_overview())
+}
+
+#[derive(Deserialize)]
+struct NewHardware {
+    name: String,
+    idea: String,
+}
+
+async fn hardware_create(State(app): State<App>, Json(h): Json<NewHardware>) -> Response {
+    match app.engine.create_hardware(&h.name, &h.idea) {
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+async fn hardware_get(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.hardware.get(&id) {
+        Some(p) => Json(app.engine.hardware_view(p)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn hardware_delete(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.delete_hardware(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+/// Instala o ambiente de CAD em segundo plano (ocupa disco, não tokens).
+async fn hardware_setup(State(app): State<App>) -> StatusCode {
+    if app.engine.hardware.setup_state() == "instalando" {
+        return StatusCode::CONFLICT;
+    }
+    let engine = app.engine.clone();
+    tokio::task::spawn_blocking(move || engine.hardware.setup());
+    StatusCode::ACCEPTED
+}
+
+/// Roda as simulações ou o modelo agora, sem agente e sem tokens.
+async fn hardware_run(State(app): State<App>, Path((id, what)): Path<(String, String)>) -> Response {
+    let Some(p) = app.engine.hardware.get(&id) else { return StatusCode::NOT_FOUND.into_response() };
+    let root = app.engine.hardware.root.clone();
+    let dir = root.join(&p.id);
+    let result = tokio::task::spawn_blocking(move || match what.as_str() {
+        "sim" => hardware::simulate(&dir).map(|(_, md)| md),
+        "build" => hardware::build(&root, &dir),
+        "erc" => hardware::erc(&root, &dir),
+        _ => Err("ação desconhecida".into()),
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    match result {
+        Ok(text) => Json(serde_json::json!({"ok": true, "output": text})).into_response(),
+        Err(e) => Json(serde_json::json!({"ok": false, "output": e})).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -394,6 +503,11 @@ async fn events(
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let paths = config::Paths::resolve();
+    // `oficinad hw …`: as ferramentas da Oficina de hardware, sem servidor.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("hw") {
+        std::process::exit(hardware::cli(&paths.home, &args[1..]));
+    }
     let (cfg, token) = config::load(&paths).expect("não consegui carregar a configuração");
     let listen = cfg.listen.clone();
     let store = store::Store::open(paths.state(), paths.home.join("conversas"));
@@ -408,6 +522,15 @@ async fn main() {
             let pause = if ticking.calm() { 3000 } else { 1000 };
             tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
             ticking.tick();
+        }
+    });
+    // O que você está fazendo: projeto, git e PR, a cada 2 minutos.
+    let watching = engine.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        loop {
+            watching.refresh_context().await;
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         }
     });
     let app = App {
@@ -451,6 +574,16 @@ async fn main() {
         .route("/v1/mind/decor/use", post(mind_decor_use))
         .route("/v1/mind/initiatives/{id}/accept", post(initiative_accept))
         .route("/v1/mind/initiatives/{id}/decline", post(initiative_decline))
+        .route("/v1/mind/initiatives/{id}/never", post(initiative_never))
+        .route("/v1/meetings", get(meetings).post(meeting_create))
+        .route("/v1/meetings/{id}", get(meeting_get).delete(meeting_delete))
+        .route("/v1/meetings/{id}/segments", post(meeting_segments))
+        .route("/v1/meetings/{id}/end", post(meeting_end))
+        .route("/v1/meetings/{id}/summarize", post(meeting_summarize))
+        .route("/v1/hardware", get(hardware_list).post(hardware_create))
+        .route("/v1/hardware/setup", post(hardware_setup))
+        .route("/v1/hardware/{id}", get(hardware_get).delete(hardware_delete))
+        .route("/v1/hardware/{id}/run/{what}", post(hardware_run))
         .route("/v1/usage", get(usage))
         .route("/v1/usage/refresh", post(usage_refresh))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));

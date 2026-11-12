@@ -1,6 +1,7 @@
 //! A mente da Faísca: sente o que acontece no Mac, passa pela rede de
 //! neurônios, cansa e dorme, pensa e, quando faz sentido, toma iniciativa.
 
+pub mod context;
 pub mod decor;
 pub mod memory;
 pub mod net;
@@ -8,6 +9,7 @@ pub mod outfit;
 
 use crate::store::{Event, Target};
 use crate::usage::now;
+use context::{WorkContext, WorkInput, is_browser};
 use memory::{Fact, Memory, human_minutes, is_ai, is_work};
 use net::{INPUTS, MOTORS, N_IN, Net};
 use decor::Decor;
@@ -38,6 +40,10 @@ const TROCA: usize = 11;
 const SEED: u64 = 0x5EED_FA15CA;
 const PRESENT_IDLE: f64 = 120.0;
 const INITIATIVE_TTL: u64 = 600;
+/// A pergunta "quer que eu ouça?" só vale no começo da chamada.
+const LISTEN_TTL: u64 = 60;
+/// Sem commit há tanto tempo, com arquivos alterados, ela lembra.
+const COMMIT_NUDGE: u64 = 2 * 3600;
 
 #[derive(Deserialize)]
 pub struct MindEvent {
@@ -63,6 +69,10 @@ pub enum Action {
     Outfit { theme: String },
     Decor { theme: String },
     Task { text: String, target: Target },
+    /// Ouvir e transcrever a chamada: quem faz é o app, no Mac.
+    Listen { bundle: String, name: String },
+    /// Resumir uma reunião transcrita (gasta tokens).
+    Summarize { meeting: String },
 }
 
 #[derive(Clone, Serialize)]
@@ -74,6 +84,9 @@ pub struct Initiative {
     pub decline: String,
     pub action: Action,
     pub at: u64,
+    /// Terceira resposta, "Nunca no Zoom", quando faz sentido.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub never: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -92,6 +105,8 @@ pub struct Brief {
     pub outfit: Option<Outfit>,
     /// A caminha em uso (a padrão, se nenhuma foi criada).
     pub decor: Decor,
+    /// Nome do app da chamada em andamento.
+    pub call: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -134,9 +149,16 @@ pub struct Snapshot {
     pub memory: MemoryView,
     pub outfits: Vec<Outfit>,
     pub decors: Vec<Decor>,
+    pub context: WorkContext,
+    pub today: Option<String>,
 }
 
 struct Focus {
+    bundle: String,
+    name: String,
+}
+
+struct Call {
     bundle: String,
     name: String,
 }
@@ -155,6 +177,13 @@ struct State {
     tasks: HashSet<String>,
     last_interaction: u64,
     projects: String,
+    work: WorkInput,
+    call: Option<Call>,
+    activity: String,
+    activity_since: u64,
+    /// PR com CI vermelho que ela já ofereceu investigar.
+    ci_offered: Option<u64>,
+    commit_offered: u64,
     /// Colocada para descansar na Dock: dorme até aqui, mesmo com você por perto.
     rest_until: u64,
     work_streak: f64,
@@ -190,6 +219,17 @@ fn local_hour(ts: u64) -> usize {
     }
 }
 
+/// AAAAMMDD no fuso local.
+fn local_day(ts: u64) -> u32 {
+    // SAFETY: `tm` é preenchida por localtime_r antes de ser lida.
+    unsafe {
+        let t = ts as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        ((tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday) as u32
+    }
+}
+
 fn pick<'a>(options: &[&'a str], salt: u64) -> &'a str {
     options[(salt as usize) % options.len()]
 }
@@ -217,6 +257,12 @@ impl Mind {
                 tasks: HashSet::new(),
                 last_interaction: now,
                 projects: String::new(),
+                work: WorkInput::default(),
+                call: None,
+                activity: String::new(),
+                activity_since: now,
+                ci_offered: None,
+                commit_offered: 0,
                 rest_until: 0,
                 work_streak: 0.0,
                 mood: "neutra".into(),
@@ -283,6 +329,36 @@ impl Mind {
                     }
                 }
                 "dock_open" => pulse(&mut s, TROCA, 0.4),
+                "call_start" => {
+                    let (Some(bundle), Some(name)) = (e.bundle, e.name) else { continue };
+                    if s.call.as_ref().is_some_and(|c| c.bundle == bundle) {
+                        continue;
+                    }
+                    s.call = Some(Call { bundle: bundle.clone(), name: name.clone() });
+                    s.mem.diary.roll(local_day(now));
+                    s.mem.diary.meetings += 1;
+                    wake(&mut s);
+                    // A pergunta passa na frente de qualquer outra iniciativa.
+                    if !s.mem.call_never.contains(&bundle) {
+                        s.seq += 1;
+                        s.initiative = Some(Initiative {
+                            id: format!("i{now:x}{:x}", s.seq),
+                            kind: format!("listen:{bundle}"),
+                            text: format!("Entrou numa chamada no {name}. Quer que eu ouça e anote? Fica tudo no Mac."),
+                            accept: "Ouvir".into(),
+                            decline: "Agora não".into(),
+                            action: Action::Listen { bundle, name: name.clone() },
+                            at: now,
+                            never: Some(format!("Nunca no {name}")),
+                        });
+                    }
+                }
+                "call_end" => {
+                    if s.initiative.as_ref().is_some_and(|i| i.kind.starts_with("listen:")) {
+                        s.initiative = None;
+                    }
+                    s.call = None;
+                }
                 "pet_rest" => {
                     let secs = e.secs.unwrap_or(900.0).clamp(60.0, 3600.0) as u64;
                     s.sleeping = true;
@@ -343,7 +419,51 @@ impl Mind {
         if !s.projects.is_empty() {
             out.push_str(&format!(" Projetos em que o usuário está atuando: {}.", s.projects));
         }
+        let now = now();
+        let ctx = context::summary(&context_of(&s, now));
+        if !ctx.is_empty() {
+            out.push(' ');
+            out.push_str(&ctx);
+        }
+        if let Some(today) = s.mem.diary.sentence() {
+            out.push_str(&format!(" Hoje até agora: {today}"));
+        }
+        if let Some(y) = &s.mem.diary.yesterday {
+            out.push_str(&format!(" Ontem: {y}"));
+        }
         out
+    }
+
+    /// O projeto atual, o git e o PR, lidos fora do ciclo.
+    pub fn set_work(&self, work: WorkInput) {
+        let mut s = self.state.lock().unwrap();
+        if work.failing.as_ref().map(|f| f.number) != s.work.failing.as_ref().map(|f| f.number) && work.failing.is_none() {
+            s.ci_offered = None;
+        }
+        s.work = work;
+    }
+
+    /// Reunião transcrita terminou: oferece o resumo.
+    pub fn offer_summary(&self, meeting: &str, title: &str) {
+        let now = now();
+        let mut s = self.state.lock().unwrap();
+        if s.initiative.is_some() {
+            return;
+        }
+        s.seq += 1;
+        s.initiative = Some(Initiative {
+            id: format!("i{now:x}{:x}", s.seq),
+            kind: "summary".into(),
+            text: format!("Anotei a reunião \"{title}\". Quer um resumo com decisões e tarefas? Gasta alguns tokens."),
+            accept: "Resumir".into(),
+            decline: "Agora não".into(),
+            action: Action::Summarize { meeting: meeting.to_string() },
+            at: now,
+            never: None,
+        });
+        s.last_initiative_at = now;
+        drop(s);
+        self.publish();
     }
 
     /// Resumo dos projetos atuais, vindo da leitura de uso.
@@ -378,6 +498,23 @@ impl Mind {
             Some(f) if present => (is_work(&f.bundle, &f.name), is_ai(&f.bundle, &f.name)),
             _ => (false, false),
         };
+        let in_call = s.call.is_some();
+        // Em chamada ela está "trabalhando" mesmo sem app de trabalho em foco.
+        let working = working || in_call;
+        s.mem.diary.roll(local_day(now));
+        if in_call {
+            s.mem.diary.meeting_secs += dt as f64;
+        } else if working && now.saturating_sub(s.work.last) < 1800 {
+            if let Some(p) = s.work.project.clone() {
+                *s.mem.diary.projects.entry(p).or_default() += dt as f64;
+            }
+        }
+        let browsing = s.focus.as_ref().is_some_and(|f| is_browser(&f.bundle, &f.name));
+        let act = context::activity(in_call, idle, working && !in_call, now.saturating_sub(s.work.last) < 900, browsing, s.work.failing.is_some()).to_string();
+        if act != s.activity {
+            s.activity = act;
+            s.activity_since = now;
+        }
         if present {
             if let Some(f) = s.focus.as_ref().map(|f| (f.bundle.clone(), f.name.clone())) {
                 s.mem.add_app_time(&f.0, &f.1, dt as f64, hour, now);
@@ -427,7 +564,8 @@ impl Mind {
         }
 
         if let Some(i) = &s.initiative {
-            if now.saturating_sub(i.at) > INITIATIVE_TTL {
+            let ttl = if i.kind.starts_with("listen:") { LISTEN_TTL } else { INITIATIVE_TTL };
+            if now.saturating_sub(i.at) > ttl {
                 let kind = base_kind(&i.kind);
                 s.initiative = None;
                 s.net.reward(-0.2);
@@ -435,7 +573,7 @@ impl Mind {
             }
         }
         let wants = s.net.motor("iniciativa") > 0.25 && s.net.motor("foco") < 0.45;
-        if s.initiative.is_none() && !s.sleeping && present && wants && now.saturating_sub(s.last_initiative_at) >= self.cooldown {
+        if s.initiative.is_none() && !in_call && !s.sleeping && present && wants && now.saturating_sub(s.last_initiative_at) >= self.cooldown {
             if let Some(c) = best(&s, now, false) {
                 show(&mut s, c, now);
             }
@@ -524,6 +662,22 @@ impl Mind {
             s.work_streak = 0.0;
         }
         s.net.reward(-0.5);
+        s.dirty = true;
+        drop(s);
+        self.publish();
+        true
+    }
+
+    /// "Nunca no Zoom": recusa e não pergunta mais nesse app.
+    pub fn never(&self, id: &str) -> bool {
+        let mut s = self.state.lock().unwrap();
+        let Some(Action::Listen { bundle, .. }) = s.initiative.as_ref().filter(|i| i.id == id).map(|i| i.action.clone()) else {
+            return false;
+        };
+        s.initiative = None;
+        if !s.mem.call_never.contains(&bundle) {
+            s.mem.call_never.push(bundle);
+        }
         s.dirty = true;
         drop(s);
         self.publish();
@@ -640,6 +794,8 @@ impl Mind {
             },
             outfits: s.mem.outfits.clone(),
             decors: s.mem.decors.clone(),
+            context: context_of(&s, now()),
+            today: s.mem.diary.sentence(),
         }
     }
 
@@ -647,13 +803,14 @@ impl Mind {
     fn publish(&self) {
         let brief = self.brief();
         let key = format!(
-            "{}|{}|{:?}|{:?}|{:?}|{}",
+            "{}|{}|{:?}|{:?}|{:?}|{}|{:?}",
             brief.mood,
             brief.sleeping,
             brief.thought.as_ref().map(|t| t.at),
             brief.initiative.as_ref().map(|i| &i.id),
             brief.outfit.as_ref().map(|o| &o.id),
-            brief.decor.id
+            brief.decor.id,
+            brief.call
         );
         let mut s = self.state.lock().unwrap();
         if s.last_brief == key {
@@ -693,6 +850,9 @@ fn mood_of(s: &State) -> String {
     if s.sleeping {
         return "dormindo".into();
     }
+    if s.call.is_some() {
+        return "focada".into();
+    }
     let names = [("alegria", "feliz"), ("curiosidade", "curiosa"), ("tedio", "entediada"), ("cansaco", "cansada"),
                  ("carencia", "carente"), ("foco", "focada")];
     let (best, value) = names
@@ -707,6 +867,9 @@ fn mood_of(s: &State) -> String {
 fn musing(s: &State, now: u64) -> Option<String> {
     let salt = now / 60 + s.seq;
     let app = s.focus.as_ref().map(|f| f.name.clone());
+    if let Some(c) = &s.call {
+        return Some(format!("Em reunião no {}. Vou ficar quietinha.", c.name));
+    }
     let text = match s.mood.as_str() {
         "focada" => match app {
             Some(a) => format!("Você está concentrado no {a}. Vou ficar quietinha."),
@@ -734,6 +897,28 @@ struct Candidate {
     accept: &'static str,
     decline: &'static str,
     action: Action,
+}
+
+fn context_of(s: &State, now: u64) -> WorkContext {
+    let git = s.work.git.clone().unwrap_or_default();
+    let recent = now.saturating_sub(s.work.last) < 2 * 3600;
+    let mut pending = Vec::new();
+    if let Some(f) = &s.work.failing {
+        pending.push(format!("CI vermelho no PR #{} ({})", f.number, f.checks.join(", ")));
+    }
+    WorkContext {
+        project: s.work.project.clone().filter(|_| recent),
+        path: s.work.path.clone().filter(|_| recent),
+        branch: git.branch.filter(|_| recent),
+        languages: if recent { git.languages } else { Vec::new() },
+        activity: s.activity.clone(),
+        since: s.activity_since,
+        dirty: if recent { git.dirty } else { 0 },
+        last_commit: git.last_commit,
+        subjects: if recent { git.subjects } else { Vec::new() },
+        call: s.call.as_ref().map(|c| c.name.clone()),
+        pending,
+    }
 }
 
 fn base_kind(kind: &str) -> String {
@@ -804,6 +989,52 @@ fn best(s: &State, now: u64, forced: bool) -> Option<Candidate> {
             },
         });
     }
+    let ctx = context_of(s, now);
+    if let (Some(f), Some(path)) = (&s.work.failing, &ctx.path) {
+        if s.ci_offered != Some(f.number) {
+            c.push(Candidate {
+                kind: format!("ci:{}", f.number),
+                score: 0.9,
+                text: format!("O CI do PR #{} falhou ({}). Quer que um agente investigue?", f.number, f.checks.join(", ")),
+                accept: "Investigar",
+                decline: "Agora não",
+                action: Action::Task {
+                    text: format!(
+                        "No projeto em {path}, o CI do PR #{} ({}) falhou nas checagens: {}. Leia o código do branch atual, \
+descubra a causa provável e proponha a correção. Não faça commit.",
+                        f.number, f.url, f.checks.join(", ")
+                    ),
+                    target: Target::Machine,
+                },
+            });
+        }
+    }
+    if let (Some(branch), true) = (&ctx.branch, ctx.dirty > 0) {
+        let since = now.saturating_sub(ctx.last_commit.max(s.commit_offered));
+        let worked = ctx.project.as_ref().and_then(|p| s.mem.diary.projects.get(p)).copied().unwrap_or(0.0);
+        if ctx.last_commit > 0 && since >= COMMIT_NUDGE && worked >= 3600.0 {
+            c.push(Candidate {
+                kind: "commit".into(),
+                score: 0.6,
+                text: format!("Faz {} sem commit no {branch}, com {} arquivo(s) alterado(s). Que tal salvar um ponto?", human_minutes(since as f64 / 60.0), ctx.dirty),
+                accept: "Boa ideia",
+                decline: "Depois",
+                action: Action::None,
+            });
+        }
+    }
+    if hour >= 18 && !s.mem.diary.shown && s.mem.diary.total() >= 2.0 * 3600.0 {
+        if let Some(day) = s.mem.diary.sentence() {
+            c.push(Candidate {
+                kind: "diary".into(),
+                score: 0.5,
+                text: format!("Seu dia até agora: {day} Bom trabalho!"),
+                accept: "Valeu!",
+                decline: "Ok",
+                action: Action::None,
+            });
+        }
+    }
     if forced {
         c.push(Candidate {
             kind: "chat".into(),
@@ -838,7 +1069,17 @@ fn show(s: &mut State, c: Candidate, now: u64) {
         decline: c.decline.into(),
         action: c.action,
         at: now,
+        never: None,
     });
+    if let Some(n) = s.initiative.as_ref().and_then(|i| i.kind.strip_prefix("ci:")).and_then(|n| n.parse().ok()) {
+        s.ci_offered = Some(n);
+    }
+    if s.initiative.as_ref().is_some_and(|i| i.kind == "commit") {
+        s.commit_offered = now;
+    }
+    if s.initiative.as_ref().is_some_and(|i| i.kind == "diary") {
+        s.mem.diary.shown = true;
+    }
     s.last_initiative_at = now;
     s.dirty = true;
 }
@@ -854,6 +1095,7 @@ fn brief_of(s: &State) -> Brief {
             .and_then(|id| s.mem.decors.iter().find(|d| &d.id == id))
             .cloned()
             .unwrap_or_else(decor::default_decor),
+        call: s.call.as_ref().map(|c| c.name.clone()),
     }
 }
 
