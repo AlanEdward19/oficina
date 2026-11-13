@@ -5,17 +5,18 @@
   @media (prefers-color-scheme: dark) { :root { --glass: rgba(30,30,30,.78); --ink: #f2f2f2; --line: rgba(255,255,255,.14); --faint: rgba(255,255,255,.45); } }
   html, body { margin: 0; height: 100%; background: transparent; font: 13px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; color: var(--ink); overflow: hidden; user-select: none; }
   body { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; }
-  #bar { display: flex; align-items: flex-end; gap: 6px; padding: 8px 12px; margin-bottom: 8px; background: var(--glass);
+  #bar { display: flex; align-items: flex-end; gap: 6px; padding: 8px 12px; margin-bottom: 6px; flex-shrink: 0; background: var(--glass);
     backdrop-filter: blur(24px); border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
   .envs { display: flex; flex-direction: column; gap: 2px; padding-right: 10px; margin-right: 4px; border-right: 1px solid var(--line); align-self: center; }
   .env { border: 0; background: none; color: var(--faint); font: inherit; font-size: 11px; cursor: pointer; text-align: left; padding: 1px 4px; border-left: 2px solid transparent; }
   .env.on { color: var(--ink); font-weight: 600; border-left-color: var(--tint); }
   .env:hover { color: var(--tint); }
-  .app { width: 48px; height: 48px; border-radius: 12px; display: grid; place-items: center; cursor: pointer; position: relative; transition: transform .14s ease; }
-  .app:hover { transform: translateY(-6px) scale(1.14); }
+  .app { width: 48px; height: 48px; border-radius: 12px; display: grid; place-items: center; cursor: pointer; position: relative;
+    transform-origin: 50% 100%; transition: transform .12s ease-out; will-change: transform; }
+  #bar.magnify .app { transition: transform .05s linear; }
   .app img { width: 40px; height: 40px; image-rendering: auto; }
   .app .letter { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--line); font-weight: 700; font-size: 18px; }
-  .app .tip { position: absolute; bottom: 60px; white-space: nowrap; background: var(--glass); border: 1px solid var(--line); padding: 3px 8px; border-radius: 6px; font-size: 12px; opacity: 0; pointer-events: none; transition: opacity .12s; }
+  .app .tip { position: absolute; bottom: 64px; white-space: nowrap; background: var(--glass); border: 1px solid var(--line); padding: 3px 8px; border-radius: 6px; font-size: 12px; opacity: 0; pointer-events: none; transition: opacity .12s; }
   .app:hover .tip { opacity: 1; }
   .sep { width: 1px; align-self: stretch; background: var(--line); margin: 4px 4px; }
   .add { color: var(--faint); font-size: 24px; font-weight: 300; }
@@ -36,6 +37,10 @@
 <script>
 "use strict";
 const ipc = m => window.ipc.postMessage(m);
+// Espaço acima da barra para os ícones ampliados e as dicas.
+const HEADROOM = 64;
+const MAX_SCALE = 1.6;
+const REACH = 140;
 const icons = {};
 let installed = [];
 const esc = s => s.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
@@ -54,6 +59,32 @@ window.Dock = {
       el.onclick = () => ipc("open:" + el.dataset.path);
       el.oncontextmenu = e => { e.preventDefault(); ipc("remove:" + el.dataset.path); };
     }
+    this.measure();
+  },
+  /// Manda ao app o tamanho exato do que aparece: a janela vira só isso.
+  measure() {
+    const bar = document.getElementById("bar");
+    const picker = document.getElementById("picker");
+    const w = Math.ceil(Math.max(bar.offsetWidth, picker.classList.contains("on") ? picker.offsetWidth : 0)) + 24;
+    const h = Math.ceil(bar.offsetHeight + 6 + HEADROOM + (picker.classList.contains("on") ? picker.offsetHeight + 8 : 0));
+    const key = w + "," + h;
+    if (key !== this.lastSize) { this.lastSize = key; ipc("size:" + key); }
+  },
+  /// Ampliação como na Dock do Mac: cresce o ícone sob o mouse e os vizinhos.
+  magnify(x) {
+    const bar = document.getElementById("bar");
+    bar.classList.add("magnify");
+    for (const el of bar.querySelectorAll(".app")) {
+      const r = el.getBoundingClientRect();
+      const d = Math.abs(x - (r.left + r.width / 2));
+      const s = 1 + (MAX_SCALE - 1) * Math.max(0, 1 - d / REACH) ** 2;
+      el.style.transform = s > 1.001 ? `translateY(${-(s - 1) * 14}px) scale(${s})` : "";
+    }
+  },
+  rest() {
+    const bar = document.getElementById("bar");
+    bar.classList.remove("magnify");
+    for (const el of bar.querySelectorAll(".app")) el.style.transform = "";
   },
   icon(path, url) {
     icons[path] = url;
@@ -62,7 +93,7 @@ window.Dock = {
     }
   },
   tint(c) { document.documentElement.style.setProperty("--tint", c); },
-  open() { ipc("picker"); },
+  open() { ipc("picker"); document.getElementById("picker").classList.add("on"); this.measure(); },
   picker(list) {
     installed = list;
     document.getElementById("picker").classList.add("on");
@@ -77,9 +108,15 @@ window.Dock = {
       .map((a, i) => `<div class="row" data-i="${installed.indexOf(a)}">${esc(a.name)}</div>`).join("");
     for (const r of document.querySelectorAll(".row")) r.onclick = () => { ipc("add:" + JSON.stringify(installed[+r.dataset.i])); this.close(); };
   },
-  close() { document.getElementById("picker").classList.remove("on"); ipc("close-picker"); },
+  close() { document.getElementById("picker").classList.remove("on"); this.measure(); },
 };
 document.getElementById("search").addEventListener("input", e => Dock.filter(e.target.value));
+const bar = document.getElementById("bar");
+let frame = 0;
+bar.addEventListener("mousemove", e => { cancelAnimationFrame(frame); const x = e.clientX; frame = requestAnimationFrame(() => Dock.magnify(x)); });
+bar.addEventListener("mouseleave", () => { cancelAnimationFrame(frame); Dock.rest(); });
+new ResizeObserver(() => Dock.measure()).observe(bar);
+new ResizeObserver(() => Dock.measure()).observe(document.getElementById("picker"));
 document.addEventListener("keydown", e => { if (e.key === "Escape") Dock.close(); });
 ipc("ready");
 </script>
