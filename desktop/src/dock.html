@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Dock</title>
+<style>
+  :root { --tint: #ff9e29; --glass: rgba(246,246,246,.78); --ink: #111; --line: rgba(0,0,0,.12); --faint: rgba(0,0,0,.4); color-scheme: light dark; }
+  @media (prefers-color-scheme: dark) { :root { --glass: rgba(30,30,30,.78); --ink: #f2f2f2; --line: rgba(255,255,255,.14); --faint: rgba(255,255,255,.45); } }
+  html, body { margin: 0; height: 100%; background: transparent; font: 13px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; color: var(--ink); overflow: hidden; user-select: none; }
+  body { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; }
+  #bar { display: flex; align-items: flex-end; gap: 6px; padding: 8px 12px; margin-bottom: 8px; background: var(--glass);
+    backdrop-filter: blur(24px); border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+  .envs { display: flex; flex-direction: column; gap: 2px; padding-right: 10px; margin-right: 4px; border-right: 1px solid var(--line); align-self: center; }
+  .env { border: 0; background: none; color: var(--faint); font: inherit; font-size: 11px; cursor: pointer; text-align: left; padding: 1px 4px; border-left: 2px solid transparent; }
+  .env.on { color: var(--ink); font-weight: 600; border-left-color: var(--tint); }
+  .env:hover { color: var(--tint); }
+  .app { width: 48px; height: 48px; border-radius: 12px; display: grid; place-items: center; cursor: pointer; position: relative; transition: transform .14s ease; }
+  .app:hover { transform: translateY(-6px) scale(1.14); }
+  .app img { width: 40px; height: 40px; image-rendering: auto; }
+  .app .letter { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--line); font-weight: 700; font-size: 18px; }
+  .app .tip { position: absolute; bottom: 60px; white-space: nowrap; background: var(--glass); border: 1px solid var(--line); padding: 3px 8px; border-radius: 6px; font-size: 12px; opacity: 0; pointer-events: none; transition: opacity .12s; }
+  .app:hover .tip { opacity: 1; }
+  .sep { width: 1px; align-self: stretch; background: var(--line); margin: 4px 4px; }
+  .add { color: var(--faint); font-size: 24px; font-weight: 300; }
+  .add:hover { color: var(--tint); }
+  #home svg { width: 40px; height: 44px; }
+  #picker { display: none; width: 420px; max-height: 300px; margin-bottom: 8px; background: var(--glass); backdrop-filter: blur(24px); border: 1px solid var(--line);
+    border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.25); padding: 10px; flex-direction: column; }
+  #picker.on { display: flex; }
+  #picker input { border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); font: inherit; font-size: 14px; padding: 6px 2px; outline: none; margin-bottom: 6px; }
+  #picker input:focus { border-bottom-color: var(--tint); }
+  #list { overflow-y: auto; }
+  .row { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+  .row:hover { background: var(--line); color: var(--tint); }
+</style></head>
+<body>
+  <div id="picker"><input id="search" placeholder="Adicionar app a este ambiente"><div id="list"></div></div>
+  <div id="bar"></div>
+<script>
+"use strict";
+const ipc = m => window.ipc.postMessage(m);
+const icons = {};
+let installed = [];
+const esc = s => s.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+window.Dock = {
+  render(s) {
+    const bar = document.getElementById("bar");
+    const envs = s.envs.map((n, i) => `<button class="env${i === s.active ? " on" : ""}" onclick="ipc('switch:${i}')">${esc(n)}</button>`).join("");
+    const apps = s.apps.map(a => {
+      const face = icons[a.path] ? `<img src="${icons[a.path]}">` : `<div class="letter">${esc(a.name[0] || "?")}</div>`;
+      return `<div class="app" data-path="${esc(a.path)}" title="">${face}<span class="tip">${esc(a.name)}</span></div>`;
+    }).join("");
+    bar.innerHTML = `<div class="envs">${envs}</div>${apps}<div class="app add" onclick="Dock.open()">+</div><div class="sep"></div>
+      <div class="app" id="home" onclick="ipc('faisca')"><svg viewBox="0 0 96 104"><path d="M48 18 C66 40 84 56 84 74 C84 92 68 102 48 102 C28 102 12 92 12 74 C12 56 30 40 48 18 Z" fill="var(--tint)"/><ellipse cx="37" cy="72" rx="5" ry="8" fill="#1a1a1a"/><ellipse cx="59" cy="72" rx="5" ry="8" fill="#1a1a1a"/></svg><span class="tip">Faísca</span></div>`;
+    for (const el of bar.querySelectorAll(".app[data-path]")) {
+      el.onclick = () => ipc("open:" + el.dataset.path);
+      el.oncontextmenu = e => { e.preventDefault(); ipc("remove:" + el.dataset.path); };
+    }
+  },
+  icon(path, url) {
+    icons[path] = url;
+    for (const el of document.querySelectorAll(".app[data-path]")) {
+      if (el.dataset.path === path) el.querySelector(".letter, img").outerHTML = `<img src="${url}">`;
+    }
+  },
+  tint(c) { document.documentElement.style.setProperty("--tint", c); },
+  open() { ipc("picker"); },
+  picker(list) {
+    installed = list;
+    document.getElementById("picker").classList.add("on");
+    const s = document.getElementById("search");
+    s.value = "";
+    s.focus();
+    this.filter("");
+  },
+  filter(q) {
+    q = q.toLowerCase();
+    document.getElementById("list").innerHTML = installed.filter(a => a.name.toLowerCase().includes(q)).slice(0, 80)
+      .map((a, i) => `<div class="row" data-i="${installed.indexOf(a)}">${esc(a.name)}</div>`).join("");
+    for (const r of document.querySelectorAll(".row")) r.onclick = () => { ipc("add:" + JSON.stringify(installed[+r.dataset.i])); this.close(); };
+  },
+  close() { document.getElementById("picker").classList.remove("on"); ipc("close-picker"); },
+};
+document.getElementById("search").addEventListener("input", e => Dock.filter(e.target.value));
+document.addEventListener("keydown", e => { if (e.key === "Escape") Dock.close(); });
+ipc("ready");
+</script>
+</body></html>

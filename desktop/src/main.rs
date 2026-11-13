@@ -12,6 +12,8 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod dock;
+
 use std::{
     fs,
     io::{Read, Write},
@@ -28,7 +30,7 @@ use tao::{
 };
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 use wry::{WebView, WebViewBuilder};
 
@@ -190,6 +192,11 @@ fn find_faisca() -> Option<Mode> {
 
 enum UserEvent {
     Pet(String),
+    Dock(String),
+    /// Ícone pronto: caminho do app e PNG em base64.
+    DockIcon(String, String),
+    /// Lista de apps instalados, em JSON, para o "+" da Dock.
+    DockApps(String),
     Menu(tray_icon::menu::MenuId),
 }
 
@@ -218,6 +225,43 @@ fn place_pet(pet: &Window) {
         let origin = m.position().to_logical::<f64>(scale);
         pet.set_outer_position(LogicalPosition::new(origin.x + size.width - 210.0, origin.y + size.height - 290.0));
     }
+}
+
+/// A Dock fica embaixo, no centro, acima da barra de tarefas. A janela só tem o
+/// tamanho da barra (e cresce para cima quando o "+" abre a lista), para não
+/// roubar cliques da área de trabalho.
+fn place_dock(win: &Window, apps: usize, picker: bool) {
+    let width = (210.0 + (apps as f64 + 2.0) * 54.0).max(460.0);
+    let height = if picker { 420.0 } else { 96.0 };
+    win.set_inner_size(LogicalSize::new(width, height));
+    if let Some(m) = win.current_monitor() {
+        let scale = m.scale_factor();
+        let size = m.size().to_logical::<f64>(scale);
+        let origin = m.position().to_logical::<f64>(scale);
+        win.set_outer_position(LogicalPosition::new(origin.x + (size.width - width) / 2.0, origin.y + size.height - height - 50.0));
+    }
+}
+
+/// O estado que a página da Dock desenha.
+fn dock_state(d: &dock::Dock) -> String {
+    let apps = d.current().map(|e| e.apps.clone()).unwrap_or_default();
+    serde_json::json!({
+        "envs": d.envs.iter().map(|e| e.name.clone()).collect::<Vec<_>>(),
+        "active": d.active,
+        "apps": apps,
+    })
+    .to_string()
+}
+
+/// Ícones de verdade, tirados em segundo plano para a Dock abrir na hora.
+fn load_icons(apps: Vec<dock::App>, proxy: tao::event_loop::EventLoopProxy<UserEvent>) {
+    std::thread::spawn(move || {
+        for a in apps {
+            if let Some(png) = dock::icon_png(&a.path) {
+                let _ = proxy.send_event(UserEvent::DockIcon(a.path, dock::base64(&png)));
+            }
+        }
+    });
 }
 
 fn main() {
@@ -266,13 +310,40 @@ fn main() {
         .build(&chat)
         .expect("conversa");
 
+    // A Dock, como no Mac: ambientes, apps fixados e a casinha da Faísca.
+    let mut dock_data = dock::Dock::open(&data_dir());
+    let mut dock_builder = WindowBuilder::new()
+        .with_title("Dock da Faísca")
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top(true)
+        .with_resizable(false)
+        .with_visible(dock_data.visible);
+    #[cfg(windows)]
+    {
+        use tao::platform::windows::WindowBuilderExtWindows;
+        dock_builder = dock_builder.with_skip_taskbar(true);
+    }
+    let dock_win = dock_builder.build(&event_loop).expect("janela da Dock");
+    place_dock(&dock_win, dock_data.current().map(|e| e.apps.len()).unwrap_or(0), false);
+    let p = proxy.clone();
+    let dock_view: WebView = WebViewBuilder::new()
+        .with_transparent(true)
+        .with_html(include_str!("dock.html"))
+        .with_ipc_handler(move |req| {
+            let _ = p.send_event(UserEvent::Dock(req.body().clone()));
+        })
+        .build(&dock_win)
+        .expect("Dock");
+
     let status = MenuItem::new(mode.label(), false, None);
+    let show_dock = CheckMenuItem::new("Mostrar Dock", true, dock_data.visible, None);
     let talk = MenuItem::new("Conversar", true, None);
     let call = MenuItem::new("Chamar a Faísca para cá", matches!(mode, Mode::Body { .. }), None);
     let search = MenuItem::new("Procurar a Faísca na rede de novo", true, None);
     let quit = MenuItem::new("Sair", true, None);
     let menu = Menu::new();
-    let _ = menu.append_items(&[&status, &PredefinedMenuItem::separator(), &talk, &call, &search, &PredefinedMenuItem::separator(), &quit]);
+    let _ = menu.append_items(&[&status, &PredefinedMenuItem::separator(), &talk, &call, &show_dock, &search, &PredefinedMenuItem::separator(), &quit]);
     let p = proxy.clone();
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         let _ = p.send_event(UserEvent::Menu(e.id));
@@ -316,8 +387,66 @@ fn main() {
                 }
                 _ => {}
             },
+            Event::UserEvent(UserEvent::Dock(msg)) => {
+                let (cmd, arg) = msg.split_once(':').unwrap_or((msg.as_str(), ""));
+                let mut changed = false;
+                match cmd {
+                    "ready" => {
+                        if let Mode::Home { token } = &mode {
+                            if let Some(c) = settings_tint(token) {
+                                let _ = dock_view.evaluate_script(&format!("Dock.tint({})", serde_json::json!(c)));
+                            }
+                        }
+                        changed = true;
+                    }
+                    "open" => dock::launch(arg),
+                    "remove" => {
+                        dock_data.remove(arg);
+                        changed = true;
+                    }
+                    "switch" => {
+                        dock_data.switch(arg.parse().unwrap_or(0));
+                        changed = true;
+                    }
+                    "add" => {
+                        if let Ok(app) = serde_json::from_str::<dock::App>(arg) {
+                            dock_data.add(app);
+                            changed = true;
+                        }
+                    }
+                    "picker" => {
+                        let n = dock_data.current().map(|e| e.apps.len()).unwrap_or(0);
+                        place_dock(&dock_win, n, true);
+                        let p = proxy.clone();
+                        std::thread::spawn(move || {
+                            let list = serde_json::to_string(&dock::installed()).unwrap_or_default();
+                            let _ = p.send_event(UserEvent::DockApps(list));
+                        });
+                    }
+                    "close-picker" => place_dock(&dock_win, dock_data.current().map(|e| e.apps.len()).unwrap_or(0), false),
+                    "faisca" => show_chat(&chat, &chat_view),
+                    _ => {}
+                }
+                if changed {
+                    dock_data.save(&data_dir());
+                    let apps = dock_data.current().map(|e| e.apps.clone()).unwrap_or_default();
+                    place_dock(&dock_win, apps.len(), false);
+                    let _ = dock_view.evaluate_script(&format!("Dock.render({})", dock_state(&dock_data)));
+                    load_icons(apps, proxy.clone());
+                }
+            }
+            Event::UserEvent(UserEvent::DockIcon(path, b64)) => {
+                let _ = dock_view.evaluate_script(&format!("Dock.icon({}, {})", serde_json::json!(path), serde_json::json!(format!("data:image/png;base64,{b64}"))));
+            }
+            Event::UserEvent(UserEvent::DockApps(list)) => {
+                let _ = dock_view.evaluate_script(&format!("Dock.picker({list})"));
+            }
             Event::UserEvent(UserEvent::Menu(id)) => {
-                if id == *talk.id() {
+                if id == *show_dock.id() {
+                    dock_data.visible = show_dock.is_checked();
+                    dock_win.set_visible(dock_data.visible);
+                    dock_data.save(&data_dir());
+                } else if id == *talk.id() {
                     show_chat(&chat, &chat_view);
                 } else if id == *call.id() {
                     if let Mode::Body { host, port, token, .. } = &mode {
@@ -353,4 +482,17 @@ fn http_auth(host: &str, port: u16, path: &str, token: &str) -> Option<u16> {
     let mut out = String::new();
     s.read_to_string(&mut out).ok()?;
     out.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// A cor da Faísca, para a Dock combinar (só quando a mente mora aqui).
+fn settings_tint(token: &str) -> Option<String> {
+    let addr = ("127.0.0.1", MAIN_PORT).to_socket_addrs().ok()?.next()?;
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
+    let req = format!("GET /v1/settings HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
+    s.write_all(req.as_bytes()).ok()?;
+    let mut out = String::new();
+    s.read_to_string(&mut out).ok()?;
+    let body = out.split_once("\r\n\r\n")?.1;
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v["body_color"].as_str().map(String::from)
 }

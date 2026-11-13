@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Testes do core
         run: cd core && cargo test
+      - name: Testes do app de desktop
+        run: cd desktop && cargo test
       - name: Pacote para Windows
         shell: bash
         run: bash scripts/build-windows.sh

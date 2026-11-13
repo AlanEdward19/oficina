@@ -179,6 +179,12 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
 - `desktop/` é o app para Windows e Linux, em Rust (tao, wry, tray-icon): o pet numa janela transparente sempre no topo,
   a conversa numa janela comum e o ícone na bandeja. As telas são páginas servidas pelo próprio core em `/ui/`
   (`core/ui/`), sem segredo; o app injeta o token.
+- **Dock no Windows** (`desktop/src/dock.rs`): a mesma ideia da Dock do Mac. Ambientes (Trabalho, Pessoal) com apps
+  fixados, o ícone de verdade de cada programa (tirado do atalho do Menu Iniciar pelo Shell do Windows e enviado como
+  PNG), "+" para escolher entre os apps instalados, clique para abrir, botão direito para tirar e a casinha da Faísca
+  no fim, que abre a conversa. Fica embaixo, no centro, acima da barra de tarefas, e a janela tem só o tamanho da
+  barra para não roubar cliques. Guardada em `dock.json`. "Mostrar Dock" na bandeja liga e desliga. A barra de tarefas
+  do Windows continua lá: substituí-la, como no Mac, fica para depois.
 - **Tudo pelo Wi-Fi.** Ao abrir, o app grita `oficina?` na rede. Se outra Oficina responde (o Mac), este computador vira
   um corpo da mesma Faísca (tipo `pc`), sem pareamento: o pet só aparece quando ela vem para cá, a conversa vai para a
   mente no Mac e as respostas são faladas com a voz do Windows. Se ninguém responde, o app liga o `oficinad` local e a
