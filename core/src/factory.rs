@@ -460,7 +460,11 @@ impl Engine {
             return self.run_agent_cloud(task, &a, prompt).await;
         }
         let dir = a.project.clone().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| self.paths.workspace());
-        let tools: Vec<String> = if read_only { READ_ONLY_TOOLS.map(String::from).to_vec() } else { self.cfg.allowed_tools.clone() };
+        let mut tools: Vec<String> = if read_only { READ_ONLY_TOOLS.map(String::from).to_vec() } else { self.cfg.allowed_tools.clone() };
+        // Projetos da Oficina de hardware ganham só o comando `oficinad hw`.
+        if self.is_hardware_dir(&dir) {
+            tools.extend(crate::hardware::tools(read_only));
+        }
         let role = format!("Você é o agente {}. Seu papel: {}", a.name, a.role);
         let choice = (a.model == AUTO || a.effort == AUTO).then(|| self.router.choose(&a.id, need));
         let model = choice.filter(|_| a.model == AUTO).map_or(a.model.as_str(), |c| c.model);

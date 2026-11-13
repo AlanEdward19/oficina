@@ -15,6 +15,8 @@ pub enum Dest {
     Agent(String),
     /// Criar um agente: `nome | papel | modelo | esforço | lugar`.
     NewAgent,
+    /// Ir até um cômodo (caixa de som) e falar lá.
+    Presence(String),
 }
 
 pub const REQUEST_KINDS: [&str; 5] = ["funcionalidade", "widget", "roupa", "casa", "bug"];
@@ -53,6 +55,10 @@ pub fn parse_delegate(text: &str) -> Option<(Dest, String)> {
             (Dest::Agent(name.trim().trim_start_matches('@').to_string()), text)
         }
         "criar-agente" => (Dest::NewAgent, prompt),
+        "presenca" | "presença" => {
+            let (place, text) = prompt.split_once(':')?;
+            (Dest::Presence(place.trim().to_string()), text)
+        }
         "melhoria" => {
             let (kind, text) = prompt.split_once(':').unwrap_or(("funcionalidade", prompt));
             let kind = kind.trim().to_lowercase();
@@ -224,6 +230,7 @@ mod tests {
         assert_eq!(parse_delegate("@@delegar agente: @Revisora: olha o PR"), Some((Dest::Agent("Revisora".into()), "olha o PR".into())));
         assert_eq!(parse_delegate("@@delegar criar-agente: Ana | revisa | opus | high | mac"), Some((Dest::NewAgent, "Ana | revisa | opus | high | mac".into())));
         assert_eq!(parse_delegate("@@delegar agente: sem tarefa"), None);
+        assert_eq!(parse_delegate("@@delegar presenca: sala: Ana, o Alan te chamou"), Some((Dest::Presence("sala".into()), "Ana, o Alan te chamou".into())));
     }
 
     #[test]

@@ -93,6 +93,8 @@ private struct CoreEvent: Decodable {
     let text: String?
     let usage: UsageData?
     let mind: MindBrief?
+    let presence: PresenceData?
+    let voice: VoiceJobData?
 }
 
 /// Fala com o `oficinad` e guarda o estado que as telas mostram.
@@ -116,6 +118,10 @@ final class Core: ObservableObject {
         return (history.filter { !ids.contains($0.id) } + live).sorted { $0.createdAt < $1.createdAt }
     }
     @Published private(set) var mind: MindBrief?
+    /// Onde a Faísca está agora (uma só, em um lugar de cada vez).
+    @Published private(set) var presence: PresenceData?
+    /// Pedidos de voz para os dispositivos: o Mac sintetiza e transcreve.
+    var onVoice: (VoiceJobData) -> Void = { _ in }
     @Published private(set) var connected = false
     @Published private(set) var problem: String?
 
@@ -153,8 +159,9 @@ final class Core: ObservableObject {
                 loadConversations()
                 loadSettings()
                 _ = await loadFactory()
+                presence = await get("presence")
                 if let s = await mindSnapshot() {
-                    mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit, decor: s.decor)
+                    mind = MindBrief(mood: s.mood, sleeping: s.sleeping, thought: s.thought, initiative: s.initiative, outfit: s.outfit, decor: s.decor, call: s.context?.call)
                 }
                 try await listen()
             } catch {
@@ -253,6 +260,10 @@ final class Core: ObservableObject {
             if let u = ev.usage { usage = u }
         case "mind":
             if let m = ev.mind { mind = m }
+        case "presence":
+            if let p = ev.presence { presence = p }
+        case "voice":
+            if let v = ev.voice { onVoice(v) }
         case "delta":
             guard let id = ev.id, let text = ev.text,
                   let i = tasks.firstIndex(where: { $0.id == id }) else { return }
@@ -460,5 +471,121 @@ final class Core: ObservableObject {
     func act(_ id: String, _ action: String) {
         let req = request("tasks/\(id)/\(action)", method: "POST")
         Task { _ = try? await session.data(for: req) }
+    }
+
+    /// "Nunca no Zoom": recusa e não pergunta mais nesse app.
+    func never(_ id: String) {
+        Task { _ = await post("mind/initiatives/\(id)/never") }
+    }
+
+    // MARK: Presença e dispositivos
+
+    /// Você chamou: ela pesa a conversa de lá; `force` sempre traz.
+    func callPresence(force: Bool) async -> CallResult? {
+        let data = await post("presence/call", json: ["force": force])
+        return data.flatMap { try? JSONDecoder().decode(CallResult.self, from: $0) }
+    }
+
+    /// Leva a Faísca até um dispositivo ("casa" é o Mac).
+    func movePresence(to: String, text: String = "") async -> String? {
+        await factoryPost("presence/move", ["to": to, "text": text])
+    }
+
+    func setDeviceNetwork(_ on: Bool) async -> String? {
+        await factoryPost("bodies/network", ["on": on])
+    }
+
+    func setAutoAccept(_ on: Bool) async -> String? {
+        await factoryPost("bodies/auto", ["on": on])
+    }
+
+    func renameDevice(_ id: String, name: String, room: String) async -> String? {
+        await factoryPost("bodies/\(id)", ["name": name, "room": room])
+    }
+
+    func forgetDevice(_ id: String) async {
+        await factoryDelete("bodies/\(id)")
+    }
+
+    func voiceClip(_ id: String) async -> Data? {
+        guard let (data, resp) = try? await session.data(for: request("voice/\(id)")),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return data
+    }
+
+    func uploadVoice(_ id: String, wav: Data) async {
+        var req = request("voice/\(id)", method: "POST")
+        req.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
+        req.httpBody = wav
+        _ = try? await session.data(for: req)
+    }
+
+    func voiceText(_ id: String, _ text: String) async {
+        _ = await post("voice/\(id)/text", json: ["text": text])
+    }
+
+    // MARK: Reuniões
+
+    func startMeeting(app: String, title: String) async -> String? {
+        let data = await post("meetings", json: ["app": app, "title": title])
+        return data.flatMap { try? JSONDecoder().decode(MeetingData.self, from: $0) }?.id
+    }
+
+    func appendMeeting(_ id: String, _ segments: [[String: Any]]) {
+        guard !segments.isEmpty else { return }
+        Task { _ = await post("meetings/\(id)/segments", json: segments) }
+    }
+
+    func endMeeting(_ id: String) {
+        Task { _ = await post("meetings/\(id)/end") }
+    }
+
+    func meetings() async -> [MeetingItem] {
+        await get("meetings") ?? []
+    }
+
+    func meeting(_ id: String) async -> MeetingData? {
+        await get("meetings/\(id)")
+    }
+
+    /// Gasta tokens: quem chama já perguntou.
+    func summarizeMeeting(_ id: String) async -> Bool {
+        await post("meetings/\(id)/summarize") != nil
+    }
+
+    func deleteMeeting(_ id: String) async {
+        _ = try? await session.data(for: request("meetings/\(id)", method: "DELETE"))
+    }
+
+    // MARK: Oficina de hardware
+
+    func hardware() async -> HardwareOverview? {
+        await get("hardware")
+    }
+
+    func hardwareProject(_ id: String) async -> HardwareProject? {
+        await get("hardware/\(id)")
+    }
+
+    /// Devolve o erro em texto, ou nil se deu certo.
+    func createHardware(name: String, idea: String) async -> String? {
+        await factoryPost("hardware", ["name": name, "idea": idea])
+    }
+
+    func runHardware(_ id: String, _ what: String) async -> HardwareRun? {
+        let data = await post("hardware/\(id)/run/\(what)")
+        return data.flatMap { try? JSONDecoder().decode(HardwareRun.self, from: $0) }
+    }
+
+    func hardwareDiagram(_ id: String) async -> BlockDiagram? {
+        await get("hardware/\(id)/diagram")
+    }
+
+    func setupHardware() {
+        Task { _ = await post("hardware/setup") }
+    }
+
+    func deleteHardware(_ id: String) async {
+        await factoryDelete("hardware/\(id)")
     }
 }

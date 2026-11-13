@@ -14,3 +14,19 @@ jobs:
         run: cd core && cargo build --release && bash tests/e2e.sh
       - name: App
         run: cd app && swift build -c release
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Testes do core
+        run: cd core && cargo test
+      - name: Testes do app de desktop
+        run: cd desktop && cargo test
+      - name: Pacote para Windows
+        shell: bash
+        run: bash scripts/build-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Oficina-Windows
+          path: build/Oficina-Windows

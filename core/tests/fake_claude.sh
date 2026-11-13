@@ -23,6 +23,9 @@ case "$prompt" in
   *"casinha da Faísca"*)
     echo '{"type":"result","result":"{\"name\":\"Ninho de Praia\",\"bed\":{\"shape\":\"nest\",\"color\":\"#C9A66B\"},\"blanket\":{\"shape\":\"stripes\",\"color\":\"#3FA7D6\"},\"extra\":{\"shape\":\"plant\",\"color\":\"#4CAF50\"}}","is_error":false}'
     exit 0 ;;
+  *"Resuma a transcrição"*)
+    echo '{"type":"result","result":"## Decisões\\n- lançar sexta","is_error":false}'
+    exit 0 ;;
   *"roupinhas para a Faísca"*)
     echo '{"type":"result","result":"Claro! {\"name\":\"AI Engineer\",\"body\":\"#FF9E29\",\"head\":{\"shape\":\"headset\",\"color\":\"#222222\"},\"face\":{\"shape\":\"glasses_round\",\"color\":\"#111111\"},\"neck\":{\"shape\":\"lanyard\",\"color\":\"#3366FF\"},\"badge\":{\"shape\":\"AI\",\"color\":\"#00AAFF\"},\"prop\":\"laptop\"}","is_error":false}'
     exit 0 ;;
@@ -50,6 +53,7 @@ case "$prompt" in
   *delegar-melhoria*) t='@@delegar melhoria: roupa: chapéu de pirata com tapa-olho' ;;
   *delegar-nuvem*) t='@@delegar nuvem: fazer na nuvem' ;;
   *delegar-pc*)    t='@@delegar maquina: fazer no pc' ;;
+  *chamar-sala*)   t='@@delegar presenca: sala: Ana, o Alan está te chamando' ;;
   *lento*)         trap 'exit 130' INT; sleep 30 & wait; t='nunca' ;;
   *erro*)
     echo '{"type":"result","result":"Please run /login","is_error":true,"session_id":"sess-1"}'

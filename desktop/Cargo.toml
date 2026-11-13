@@ -1,0 +1,25 @@
+[package]
+name = "oficina-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "A Faísca no Windows e no Linux: pet, conversa e ícone na bandeja."
+
+[[bin]]
+name = "Oficina"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tao = "0.37"
+tray-icon = "0.26"
+wry = "0.57"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

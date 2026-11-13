@@ -1,10 +1,15 @@
 mod clean;
+mod body;
 mod config;
 mod conv;
 mod engine;
 mod factory;
+mod hardware;
+mod meeting;
 mod mind;
 mod peer;
+mod platform;
+mod presence;
 mod route;
 mod router;
 mod store;
@@ -26,15 +31,32 @@ use futures_util::stream::{self, Stream};
 use serde::Deserialize;
 use std::{convert::Infallible, sync::Arc};
 use store::Target;
-use tokio::{
-    signal::unix::{SignalKind, signal},
-    sync::broadcast::error::RecvError,
-};
+use tokio::sync::broadcast::error::RecvError;
+
+/// Espera o pedido para encerrar: SIGTERM/SIGINT no Unix, Ctrl+C no Windows.
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("sinal");
+        let mut int = signal(SignalKind::interrupt()).expect("sinal");
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
 
 #[derive(Clone)]
 struct App {
     engine: Arc<Engine>,
     token: Arc<str>,
+    /// A porta dos dispositivos, quando ligada.
+    bodies: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Deserialize)]
@@ -48,6 +70,11 @@ struct Message {
 
 fn auto() -> Target {
     Target::Auto
+}
+
+/// Para os outros módulos: mesma comparação em tempo constante.
+pub(crate) fn token_eq(given: &str, expected: &str) -> bool {
+    token_matches(given, expected)
 }
 
 /// Compara sem encerrar no primeiro byte diferente.
@@ -154,9 +181,125 @@ async fn initiative_decline(State(app): State<App>, Path(id): Path<String>) -> S
     if app.engine.mind.decline(&id) { StatusCode::NO_CONTENT } else { StatusCode::CONFLICT }
 }
 
+async fn initiative_never(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.mind.never(&id) { StatusCode::NO_CONTENT } else { StatusCode::CONFLICT }
+}
+
 async fn mind_forget(State(app): State<App>) -> StatusCode {
     app.engine.mind.forget();
+    app.engine.meetings.forget();
     StatusCode::NO_CONTENT
+}
+
+// MARK: Reuniões
+
+async fn meetings(State(app): State<App>) -> impl IntoResponse {
+    Json(app.engine.meetings.list())
+}
+
+#[derive(Deserialize)]
+struct NewMeeting {
+    app: String,
+    #[serde(default)]
+    title: String,
+}
+
+async fn meeting_create(State(app): State<App>, Json(m): Json<NewMeeting>) -> Response {
+    (StatusCode::CREATED, Json(app.engine.meetings.start(&m.app, &m.title, usage::now()))).into_response()
+}
+
+async fn meeting_get(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.meetings.get(&id) {
+        Some(m) => Json(m).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn meeting_delete(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.meetings.delete(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+async fn meeting_segments(State(app): State<App>, Path(id): Path<String>, Json(s): Json<Vec<meeting::Segment>>) -> StatusCode {
+    if app.engine.meetings.append(&id, s) { StatusCode::NO_CONTENT } else { StatusCode::CONFLICT }
+}
+
+async fn meeting_end(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.end_meeting(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+async fn meeting_summarize(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.summarize_meeting(&id) {
+        Ok(task) => (StatusCode::CREATED, Json(task)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+// MARK: Oficina de hardware
+
+async fn hardware_list(State(app): State<App>) -> impl IntoResponse {
+    Json(app.engine.hardware_overview())
+}
+
+#[derive(Deserialize)]
+struct NewHardware {
+    name: String,
+    idea: String,
+}
+
+async fn hardware_create(State(app): State<App>, Json(h): Json<NewHardware>) -> Response {
+    match app.engine.create_hardware(&h.name, &h.idea) {
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+async fn hardware_get(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.hardware.get(&id) {
+        Some(p) => Json(app.engine.hardware_view(p)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn hardware_diagram(State(app): State<App>, Path(id): Path<String>) -> Response {
+    let Some(p) = app.engine.hardware.get(&id) else { return StatusCode::NOT_FOUND.into_response() };
+    match hardware::diagram_of(&app.engine.hardware.root.join(&p.id)) {
+        Some(d) => Json(d).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+async fn hardware_delete(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    if app.engine.delete_hardware(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+/// Instala o ambiente de CAD em segundo plano (ocupa disco, não tokens).
+async fn hardware_setup(State(app): State<App>) -> StatusCode {
+    if app.engine.hardware.setup_state() == "instalando" {
+        return StatusCode::CONFLICT;
+    }
+    let engine = app.engine.clone();
+    tokio::task::spawn_blocking(move || engine.hardware.setup());
+    StatusCode::ACCEPTED
+}
+
+/// Roda as simulações ou o modelo agora, sem agente e sem tokens.
+async fn hardware_run(State(app): State<App>, Path((id, what)): Path<(String, String)>) -> Response {
+    let Some(p) = app.engine.hardware.get(&id) else { return StatusCode::NOT_FOUND.into_response() };
+    let root = app.engine.hardware.root.clone();
+    let dir = root.join(&p.id);
+    let result = tokio::task::spawn_blocking(move || match what.as_str() {
+        "sim" => hardware::simulate(&dir).map(|(_, md)| md),
+        "build" => hardware::build(&root, &dir),
+        "erc" => hardware::erc(&root, &dir),
+        "firmware" => hardware::firmware(&root, &dir),
+        _ => Err("ação desconhecida".into()),
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    match result {
+        Ok(text) => Json(serde_json::json!({"ok": true, "output": text})).into_response(),
+        Err(e) => Json(serde_json::json!({"ok": false, "output": e})).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -376,6 +519,332 @@ async fn brain_reset(State(app): State<App>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+// MARK: Interface web (pet e conversa para Windows e Linux)
+
+const UI: &[(&str, &str, &str)] = &[
+    ("pet.html", "text/html; charset=utf-8", include_str!("../ui/pet.html")),
+    ("chat.html", "text/html; charset=utf-8", include_str!("../ui/chat.html")),
+    ("app.js", "text/javascript; charset=utf-8", include_str!("../ui/app.js")),
+    ("style.css", "text/css; charset=utf-8", include_str!("../ui/style.css")),
+];
+
+/// Arquivos estáticos, sem segredo nenhum: o token vem do app de desktop.
+async fn ui(Path(file): Path<String>) -> Response {
+    match UI.iter().find(|(name, _, _)| *name == file) {
+        Some((_, kind, body)) => ([(header::CONTENT_TYPE, *kind), (header::CACHE_CONTROL, "no-cache")], *body).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+// MARK: Presença (as suas rotas)
+
+async fn presence_get(State(app): State<App>) -> impl IntoResponse {
+    Json(app.engine.presence_view())
+}
+
+#[derive(Deserialize)]
+struct MoveBody {
+    to: String,
+    #[serde(default)]
+    text: String,
+}
+
+async fn presence_move(State(app): State<App>, Json(m): Json<MoveBody>) -> Response {
+    match app.engine.go(&m.to, &m.text) {
+        Ok(_) => Json(app.engine.presence_view()).into_response(),
+        Err(e) if m.to == presence::HOME => { let _ = e; Json(app.engine.presence_view()).into_response() }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CallBody {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn presence_call(State(app): State<App>, Json(c): Json<CallBody>) -> impl IntoResponse {
+    Json(app.engine.owner_call(c.force))
+}
+
+/// Liga ou desliga a porta dos dispositivos na rede.
+fn set_body_network(app: &App, on: bool) -> Result<(), String> {
+    let mut slot = app.bodies.lock().unwrap();
+    for h in slot.drain(..) {
+        h.abort();
+    }
+    app.engine.presence.set_network(on);
+    if on {
+        let addr = app.engine.cfg.body_listen.clone();
+        let std_listener = std::net::TcpListener::bind(&addr).map_err(|e| format!("não consegui abrir {addr}: {e}"))?;
+        std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let listener = tokio::net::TcpListener::from_std(std_listener).map_err(|e| e.to_string())?;
+        let router = body_router(app.engine.clone());
+        slot.push(tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        }));
+        // Descoberta: a caixa grita "oficina?" na rede e o core responde onde está.
+        if let Ok(udp) = std::net::UdpSocket::bind(&addr).and_then(|u| u.set_nonblocking(true).map(|_| u)) {
+            if let Ok(udp) = tokio::net::UdpSocket::from_std(udp) {
+                let port = listener_port(&addr);
+                let name = app.engine.name.clone();
+                slot.push(tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    loop {
+                        let Ok((n, from)) = udp.recv_from(&mut buf).await else { continue };
+                        if &buf[..n] == b"oficina?" {
+                            let _ = udp.send_to(format!("oficina:{port}:{name}").as_bytes(), from).await;
+                        }
+                    }
+                }));
+            }
+        }
+        eprintln!("oficinad: dispositivos em {addr}");
+    }
+    app.engine.publish_presence();
+    Ok(())
+}
+
+fn listener_port(addr: &str) -> u16 {
+    addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(7879)
+}
+
+#[derive(Deserialize)]
+struct NetworkBody {
+    on: bool,
+}
+
+async fn bodies_auto(State(app): State<App>, Json(n): Json<NetworkBody>) -> impl IntoResponse {
+    app.engine.presence.set_auto_accept(n.on);
+    app.engine.publish_presence();
+    Json(app.engine.presence_view())
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    room: String,
+}
+
+async fn bodies_rename(State(app): State<App>, Path(id): Path<String>, Json(r): Json<RenameBody>) -> Response {
+    match app.engine.presence.rename(&id, &r.name, &r.room) {
+        Some(_) => {
+            app.engine.publish_presence();
+            Json(app.engine.presence_view()).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn bodies_network(State(app): State<App>, Json(n): Json<NetworkBody>) -> Response {
+    match set_body_network(&app, n.on) {
+        Ok(()) => Json(app.engine.presence_view()).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// Um código para parear uma caixa de som. Liga a porta dos dispositivos.
+async fn bodies_pairing(State(app): State<App>) -> Response {
+    if !app.engine.presence.network() || app.bodies.lock().unwrap().is_empty() {
+        if let Err(e) = set_body_network(&app, true) {
+            return (StatusCode::BAD_REQUEST, e).into_response();
+        }
+    }
+    let code = app.engine.presence.start_pairing(usage::now());
+    app.engine.publish_presence();
+    Json(serde_json::json!({"code": code, "port": app.engine.cfg.body_listen})).into_response()
+}
+
+async fn bodies_forget(State(app): State<App>, Path(id): Path<String>) -> StatusCode {
+    match app.engine.presence.forget(&id) {
+        Some(b) => {
+            app.engine.convs.delete(&b.conversation);
+            app.engine.publish_presence();
+            StatusCode::NO_CONTENT
+        }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+async fn voice_get(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.engine.voice_clip(&id) {
+        Some(bytes) => ([(header::CONTENT_TYPE, "audio/wav")], bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn voice_put(State(app): State<App>, Path(id): Path<String>, bytes: axum::body::Bytes) -> StatusCode {
+    if app.engine.voice_rendered(&id, bytes.to_vec()) { StatusCode::NO_CONTENT } else { StatusCode::BAD_REQUEST }
+}
+
+#[derive(Deserialize)]
+struct VoiceText {
+    text: String,
+}
+
+async fn voice_text(State(app): State<App>, Path(id): Path<String>, Json(t): Json<VoiceText>) -> Response {
+    match app.engine.voice_text(&id, &t.text) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e).into_response(),
+    }
+}
+
+// MARK: Presença (as rotas dos dispositivos, na porta deles)
+
+#[derive(Clone)]
+struct BodyApp {
+    engine: Arc<Engine>,
+}
+
+/// Só tokens de dispositivo entram; cada pedido conta como sinal de vida.
+async fn body_auth(State(app): State<BodyApp>, mut req: Request, next: Next) -> Response {
+    let token = req.headers().get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer "));
+    match token.and_then(|t| app.engine.presence.auth(t)) {
+        Some(b) => {
+            app.engine.presence.heartbeat(&b.id, usage::now());
+            req.extensions_mut().insert(b);
+            next.run(req).await
+        }
+        None => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PairBody {
+    code: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    room: String,
+    #[serde(default)]
+    kind: String,
+}
+
+async fn body_pair(State(app): State<BodyApp>, Json(p): Json<PairBody>) -> Response {
+    let conv = app.engine.convs.create(Some(&format!("Voz · {}", if p.room.trim().is_empty() { "sala" } else { p.room.trim() })), None);
+    match app.engine.presence.pair(&p.code, &p.name, &p.room, &p.kind, conv.id.clone(), usage::now()) {
+        Ok(b) => {
+            app.engine.publish_presence();
+            Json(serde_json::json!({"id": b.id, "token": b.token, "name": b.name, "room": b.room})).into_response()
+        }
+        Err(e) => {
+            app.engine.convs.delete(&conv.id);
+            (StatusCode::FORBIDDEN, e).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct HelloBody {
+    device: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    room: String,
+    #[serde(default)]
+    kind: String,
+}
+
+/// Sem pareamento: o dispositivo diz quem é e entra (se o aceite automático estiver ligado).
+async fn body_hello(State(app): State<BodyApp>, Json(h): Json<HelloBody>) -> Response {
+    let engine = app.engine.clone();
+    let result = app.engine.presence.hello(&h.device, &h.name, &h.room, &h.kind, |room| {
+        engine.convs.create(Some(&format!("Voz · {room}")), None).id
+    }, usage::now());
+    match result {
+        Ok((b, new)) => {
+            if new {
+                let what = if b.kind == "pc" { format!("Novo computador na rede: {}", b.name) } else { format!("Nova caixa na rede: {}, na {}", b.name, b.room) };
+                app.engine.mind.note(format!("{what}."));
+            }
+            app.engine.publish_presence();
+            Json(serde_json::json!({"id": b.id, "token": b.token, "name": b.name, "room": b.room})).into_response()
+        }
+        Err(e) => (StatusCode::FORBIDDEN, e).into_response(),
+    }
+}
+
+async fn body_heartbeat(State(app): State<BodyApp>) -> impl IntoResponse {
+    let v = app.engine.presence_view();
+    Json(serde_json::json!({"holder": v.holder}))
+}
+
+/// Espera até 25 s por comandos: é assim que a caixa recebe o que fazer.
+async fn body_next(
+    State(app): State<BodyApp>,
+    axum::Extension(b): axum::Extension<presence::Body>,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    // `?wait=20` sem puxar o extrator de query só por isso.
+    let wait = uri.query().unwrap_or("").split('&').find_map(|kv| kv.strip_prefix("wait=")).and_then(|v| v.parse::<u64>().ok());
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(wait.unwrap_or(20).min(25));
+    loop {
+        let notified = app.engine.presence.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let commands = app.engine.presence.take(&b.id);
+        let here = app.engine.presence.holder() == b.id;
+        if !commands.is_empty() || tokio::time::Instant::now() >= until {
+            return Json(serde_json::json!({"commands": commands, "here": here}));
+        }
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep_until(until) => {}
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct Heard {
+    text: String,
+}
+
+async fn body_heard(State(app): State<BodyApp>, axum::Extension(b): axum::Extension<presence::Body>, Json(h): Json<Heard>) -> Response {
+    match app.engine.heard(&b, &h.text) {
+        Ok(_) => StatusCode::ACCEPTED.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e).into_response(),
+    }
+}
+
+async fn body_audio_in(State(app): State<BodyApp>, axum::Extension(b): axum::Extension<presence::Body>, bytes: axum::body::Bytes) -> Response {
+    match app.engine.body_audio(&b, bytes.to_vec()) {
+        Ok(id) => (StatusCode::ACCEPTED, Json(serde_json::json!({"id": id}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+async fn body_audio_out(State(app): State<BodyApp>, Path(id): Path<String>) -> Response {
+    match app.engine.voice_clip(&id) {
+        Some(bytes) => ([(header::CONTENT_TYPE, "audio/wav")], bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn body_call(State(app): State<BodyApp>, axum::Extension(b): axum::Extension<presence::Body>) -> impl IntoResponse {
+    Json(serde_json::json!({"result": app.engine.body_call(&b)}))
+}
+
+fn body_router(engine: Arc<Engine>) -> Router {
+    let app = BodyApp { engine };
+    let private = Router::new()
+        .route("/v1/body/heartbeat", post(body_heartbeat))
+        .route("/v1/body/next", get(body_next))
+        .route("/v1/body/heard", post(body_heard))
+        .route("/v1/body/audio", post(body_audio_in))
+        .route("/v1/body/audio/{id}", get(body_audio_out))
+        .route("/v1/body/call", post(body_call))
+        .route_layer(middleware::from_fn_with_state(app.clone(), body_auth));
+    Router::new()
+        .route("/v1/body/pair", post(body_pair))
+        .route("/v1/body/hello", post(body_hello))
+        .route("/ui/{file}", get(ui))
+        .merge(private)
+        .layer(axum::extract::DefaultBodyLimit::max(body::MAX_AUDIO + 1024))
+        .with_state(app)
+}
+
 async fn events(
     State(app): State<App>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -394,6 +863,11 @@ async fn events(
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let paths = config::Paths::resolve();
+    // `oficinad hw …`: as ferramentas da Oficina de hardware, sem servidor.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("hw") {
+        std::process::exit(hardware::cli(&paths.home, &args[1..]));
+    }
     let (cfg, token) = config::load(&paths).expect("não consegui carregar a configuração");
     let listen = cfg.listen.clone();
     let store = store::Store::open(paths.state(), paths.home.join("conversas"));
@@ -410,10 +884,34 @@ async fn main() {
             ticking.tick();
         }
     });
+    // O que você está fazendo: projeto, git e PR, a cada 2 minutos.
+    let watching = engine.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        loop {
+            watching.refresh_context().await;
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        }
+    });
+    // A presença: falar as respostas nos corpos e voltar para casa na hora certa.
+    let present = engine.clone();
+    let started = usage::now();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            present.presence_tick(started).await;
+        }
+    });
     let app = App {
         engine,
         token: token.into(),
+        bodies: Default::default(),
     };
+    if app.engine.presence.network() {
+        if let Err(e) = set_body_network(&app, true) {
+            eprintln!("oficinad: {e}");
+        }
+    }
 
     let private = Router::new()
         .route("/v1/machines", get(machines))
@@ -451,11 +949,32 @@ async fn main() {
         .route("/v1/mind/decor/use", post(mind_decor_use))
         .route("/v1/mind/initiatives/{id}/accept", post(initiative_accept))
         .route("/v1/mind/initiatives/{id}/decline", post(initiative_decline))
+        .route("/v1/mind/initiatives/{id}/never", post(initiative_never))
+        .route("/v1/meetings", get(meetings).post(meeting_create))
+        .route("/v1/meetings/{id}", get(meeting_get).delete(meeting_delete))
+        .route("/v1/meetings/{id}/segments", post(meeting_segments))
+        .route("/v1/meetings/{id}/end", post(meeting_end))
+        .route("/v1/meetings/{id}/summarize", post(meeting_summarize))
+        .route("/v1/hardware", get(hardware_list).post(hardware_create))
+        .route("/v1/hardware/setup", post(hardware_setup))
+        .route("/v1/hardware/{id}", get(hardware_get).delete(hardware_delete))
+        .route("/v1/hardware/{id}/run/{what}", post(hardware_run))
+        .route("/v1/hardware/{id}/diagram", get(hardware_diagram))
+        .route("/v1/presence", get(presence_get))
+        .route("/v1/presence/move", post(presence_move))
+        .route("/v1/presence/call", post(presence_call))
+        .route("/v1/bodies/pairing", post(bodies_pairing))
+        .route("/v1/bodies/network", post(bodies_network))
+        .route("/v1/bodies/auto", post(bodies_auto))
+        .route("/v1/bodies/{id}", delete(bodies_forget).post(bodies_rename))
+        .route("/v1/voice/{id}", get(voice_get).post(voice_put))
+        .route("/v1/voice/{id}/text", post(voice_text))
         .route("/v1/usage", get(usage))
         .route("/v1/usage/refresh", post(usage_refresh))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
     let router = Router::new()
         .route("/v1/health", get(health))
+        .route("/ui/{file}", get(ui))
         .merge(private)
         .with_state(app);
 
@@ -464,14 +983,11 @@ async fn main() {
         .unwrap_or_else(|e| panic!("não consegui abrir {listen}: {e}"));
     eprintln!("oficinad ouvindo em {listen}");
 
-    let mut term = signal(SignalKind::terminate()).expect("sinal");
-    let mut int = signal(SignalKind::interrupt()).expect("sinal");
     tokio::select! {
         r = axum::serve(listener, router).into_future() => {
             if let Err(e) = r { eprintln!("oficinad: {e}"); }
         }
-        _ = term.recv() => {}
-        _ = int.recv() => {}
+        _ = shutdown() => {}
     }
     let _ = store.flush();
     mind_ref.flush();

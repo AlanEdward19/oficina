@@ -40,7 +40,9 @@ Oficina puts all three in one small native app. The creature on your screen is t
 ## What you get
 
 - **A pet with a nervous system.** Faísca runs on a small spiking neural network (12 inputs, 49 interneurons, 7 motor neurons) with reward learning, so her moods and habits come from what happens to her. She walks your screen, naps in a bed on your Dock and crawls out from under the edge when the Dock is hidden.
-- **She learns what you do.** Faísca notices which projects you're working on and which apps you use, then suggests things, like spending a few tokens on an AI-engineer outfit. She only ever sees app names and time of use, never your screen or window titles.
+- **She learns what you do.** Faísca notices which projects you're working on and which apps you use, then suggests things, like spending a few tokens on an AI-engineer outfit. She reads your project's git (branch, uncommitted files, commit subjects) and its PR checks, so she can offer help when CI goes red. She only ever sees app names and time of use, never your screen or window titles.
+- **One Faísca, anywhere on your Wi-Fi.** Speakers and other computers find her on the network and join without pairing. She is in one place at a time: ask her to call someone in the living room and she walks off your screen and talks there. A Windows/Linux app (`desktop/`) runs her on a notebook too.
+- **Meeting notes, if you say yes.** When an app like Zoom, Teams, Discord or WhatsApp starts using the microphone, she asks whether to listen. Transcription runs on your Mac and audio is never stored. Only the summary you ask for goes to Claude.
 - **Make her yours.** Name, personality, colors, eyes, antenna, size and the model behind her brain. New outfits and beds get drawn from a validated vocabulary, so she can't wear something the app can't render.
 - **A real chat.** Every conversation is a genuine Claude Code session you can resume in your terminal later. Press <kbd>⌃</kbd><kbd>⌥</kbd><kbd>Space</kbd> from anywhere.
 - **Your Dock, replaced.** Spaces for Work, Personal and whatever else, switched with <kbd>⌃</kbd><kbd>⌥</kbd><kbd>1</kbd>–<kbd>9</kbd>. It follows your macOS auto-hide settings, and the system Dock comes back when you quit.
@@ -76,6 +78,10 @@ Agents on **Automatic** don't burn Opus on a summary. A local classifier picks t
 | **Probe** | One in eight read-only stages tries a tier lower, the only way to find out a smaller model was enough. |
 
 Verification never runs below Sonnet, since nothing would catch a wrong approval. Fable runs only when you pick it, and access or rate-limit errors never trigger a more expensive retry.
+
+## The hardware workshop
+
+Describe a gadget, say AI glasses with a camera, mic and four hours of battery, and an agent builds the project package: requirements, research, block diagram and wiring map, parts list with prices, a parametric 3D model in build123d, simulations and assembly steps. Battery life, weight, center of mass, cost, heat and part interference are checked on your Mac without spending tokens. Agents get no free shell, only the workshop's own `oficinad hw` commands.
 
 ## How it works
 
@@ -127,7 +133,6 @@ Oficina is young and runs on one Mac so far. Chat, the pet, the Dock and cloud a
 
 - Faísca on an Alexa Echo, a kitchen touchscreen and a phone.
 - Free cloud machines for agents to work on.
-- **An agentic hardware workshop.** An agent takes an idea, prototypes it and comes back with a 3D model.
 
 ## Contributing
 

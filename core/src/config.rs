@@ -1,10 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    io::{Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 /// Outra máquina da Oficina, alcançável pela rede.
 #[derive(Clone, Serialize, Deserialize)]
@@ -27,6 +22,9 @@ pub struct Config {
     pub machines: Vec<Peer>,
     /// Repositório da Oficina no GitHub ("dono/nome"), para pedidos de melhoria.
     pub repo: Option<String>,
+    /// Porta só para dispositivos (caixa de som, celular), aberta quando você liga
+    /// "Aceitar dispositivos na rede". A API principal continua só no localhost.
+    pub body_listen: String,
 }
 
 impl Default for Config {
@@ -53,6 +51,7 @@ impl Default for Config {
             .to_vec(),
             machines: vec![],
             repo: None,
+            body_listen: "0.0.0.0:7879".into(),
         }
     }
 }
@@ -66,10 +65,7 @@ impl Paths {
     pub fn resolve() -> Self {
         let home = std::env::var_os("OFICINA_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").expect("HOME não definido"))
-                    .join("Library/Application Support/Oficina")
-            });
+            .unwrap_or_else(crate::platform::data_dir);
         Self { home }
     }
     pub fn state(&self) -> PathBuf {
@@ -88,7 +84,7 @@ pub fn load(paths: &Paths) -> std::io::Result<(Config, String)> {
     for dir in [paths.home.clone(), paths.workspace(), paths.brain_dir()] {
         fs::create_dir_all(&dir)?;
     }
-    fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700))?;
+    crate::platform::private_dir(&paths.home)?;
 
     let cfg_path = paths.home.join("config.json");
     let mut cfg: Config = match fs::read(&cfg_path) {
@@ -103,23 +99,23 @@ pub fn load(paths: &Paths) -> std::io::Result<(Config, String)> {
     if let Ok(listen) = std::env::var("OFICINA_LISTEN") {
         cfg.listen = listen;
     }
+    if let Ok(listen) = std::env::var("OFICINA_BODY_LISTEN") {
+        cfg.body_listen = listen;
+    }
 
     let token_path = paths.home.join("token");
     let token = match fs::read_to_string(&token_path) {
         Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => {
-            let mut raw = [0u8; 32];
-            fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
-            let t: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-            fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&token_path)?
-                .write_all(t.as_bytes())?;
+            let t = random_hex(32)?;
+            crate::platform::write_private(&token_path, t.as_bytes())?;
             t
         }
     };
     Ok((cfg, token))
+}
+
+/// Bytes aleatórios do sistema, em hexadecimal.
+pub fn random_hex(n: usize) -> std::io::Result<String> {
+    Ok(crate::platform::random_bytes(n)?.iter().map(|b| format!("{b:02x}")).collect())
 }

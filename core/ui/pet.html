@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Faísca</title><link rel="stylesheet" href="style.css"></head>
+<body class="pet">
+  <div class="balloon" id="balloon"><div id="say"></div><div class="actions" id="actions"></div></div>
+  <svg id="faisca" viewBox="0 0 96 104" aria-label="Faísca">
+    <line x1="48" y1="22" x2="48" y2="8" stroke="#333" stroke-width="3" stroke-linecap="round"/>
+    <circle id="spark" cx="48" cy="7" r="5" fill="var(--spark)"/>
+    <path id="drop" d="M48 18 C66 40 84 56 84 74 C84 92 68 102 48 102 C28 102 12 92 12 74 C12 56 30 40 48 18 Z" fill="var(--tint)"/>
+    <ellipse class="eye" cx="37" cy="72" rx="5" ry="8" fill="#1a1a1a"/>
+    <ellipse class="eye" cx="59" cy="72" rx="5" ry="8" fill="#1a1a1a"/>
+    <path id="mouth" d="M41 88 Q48 93 55 88" stroke="#1a1a1a" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  </svg>
+  <script src="app.js"></script>
+  <script>Oficina.pet();</script>
+</body></html>

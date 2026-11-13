@@ -2,10 +2,14 @@ use crate::{
     config::{Config, Paths, Peer},
     conv::Conversations,
     factory::{AgentSpec, Factory},
+    body::Voice,
+    hardware::Hardware,
+    meeting::Meetings,
+    presence::Presences,
     clean::Cleaner,
     router::{AUTO, Need, Router},
     peer,
-    mind::{Action, Initiative, Mind, decor, outfit},
+    mind::{Action, Initiative, Mind, context, decor, outfit},
     route::{self, CliEvent, Dest, Holdback},
     store::{Event, Status, Store, Target, Task},
     usage::{self, Scanner, Usage},
@@ -57,6 +61,12 @@ pub struct Engine {
     scanner: Arc<Mutex<Scanner>>,
     refreshing: AtomicBool,
     pub mind: Arc<Mind>,
+    pub meetings: Meetings,
+    pub hardware: Hardware,
+    pub presence: Presences,
+    pub voice: Voice,
+    /// Última vez que o PR do branch atual foi consultado no GitHub.
+    pr_checked: Mutex<(String, u64, Option<context::FailingPr>)>,
 }
 
 #[derive(Serialize)]
@@ -76,32 +86,26 @@ pub(crate) struct RunOut {
     pub(crate) session: Option<String>,
 }
 
-/// Procura o `claude` também onde um app gráfico não enxerga pelo PATH.
-fn find_gh() -> PathBuf {
+/// Procura o `gh` também onde um app gráfico não enxerga pelo PATH.
+pub(crate) fn find_gh() -> PathBuf {
     if let Some(p) = std::env::var_os("OFICINA_GH") {
         return PathBuf::from(p);
     }
-    ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("gh"))
+    crate::platform::find_program("gh", &[PathBuf::from("/opt/homebrew/bin/gh"), PathBuf::from("/usr/local/bin/gh")])
 }
 
 fn find_claude() -> PathBuf {
     if let Some(p) = std::env::var_os("OFICINA_CLAUDE") {
         return PathBuf::from(p);
     }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    [
-        PathBuf::from("/opt/homebrew/bin/claude"),
-        PathBuf::from("/usr/local/bin/claude"),
-        home.join(".local/bin/claude"),
-        home.join(".claude/local/claude"),
-    ]
-    .into_iter()
-    .find(|p| p.exists())
-    .unwrap_or_else(|| PathBuf::from("claude"))
+    let home = crate::platform::home_dir();
+    let mut known = vec![home.join(".local/bin/claude"), home.join(".claude/local/claude")];
+    if cfg!(windows) {
+        known = vec![home.join(".local/bin/claude.exe"), home.join("AppData/Roaming/npm/claude.cmd")];
+    } else {
+        known.splice(0..0, [PathBuf::from("/opt/homebrew/bin/claude"), PathBuf::from("/usr/local/bin/claude")]);
+    }
+    crate::platform::find_program("claude", &known)
 }
 
 fn claude_projects() -> PathBuf {
@@ -110,32 +114,8 @@ fn claude_projects() -> PathBuf {
     }
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".claude"))
+        .unwrap_or_else(|| crate::platform::home_dir().join(".claude"))
         .join("projects")
-}
-
-fn hostname() -> String {
-    // O hostname do Mac muda com a rede (pode virar o IP do DHCP).
-    let named = std::process::Command::new("/usr/sbin/scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
-    if let Some(name) = named {
-        return name;
-    }
-    let mut buf = [0u8; 256];
-    // SAFETY: o buffer é válido e seu tamanho é informado à chamada.
-    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
-    let end = buf.iter().position(|b| *b == 0).unwrap_or(0);
-    let name = String::from_utf8_lossy(&buf[..end]);
-    if ok && !name.is_empty() {
-        name.trim_end_matches(".local").to_string()
-    } else {
-        "este-mac".into()
-    }
 }
 
 /// Garante que o CLI use o login da assinatura, sem herdar chave de API nem
@@ -151,7 +131,8 @@ pub(crate) fn claude_cmd(path: &PathBuf) -> Command {
             cmd.env_remove(&key);
         }
     }
-    cmd.kill_on_drop(true).process_group(0);
+    cmd.kill_on_drop(true);
+    crate::platform::own_group(&mut cmd);
     cmd
 }
 
@@ -171,6 +152,9 @@ impl Engine {
         let convs = Conversations::open(paths.home.join("conversas.json"));
         let factory = Factory::open(paths.home.join("fabrica.json"));
         let router = Router::open(paths.home.join("router.json"));
+        let meetings = Meetings::open(paths.home.join("reunioes"));
+        let hardware = Hardware::open(paths.home.join("hardware"));
+        let presence = Presences::open(paths.home.join("presenca.json"), usage::now());
         // Tarefas de antes das conversas vão para uma conversa própria.
         if let Some(first) = store.has_orphans() {
             let c = convs.create(Some("Conversas anteriores"), Some(first));
@@ -181,18 +165,23 @@ impl Engine {
             store,
             cfg,
             paths,
-            name: hostname(),
+            name: crate::platform::hostname(),
             claude: find_claude(),
             brains: Default::default(),
             convs,
             factory,
             router,
-            clean: Cleaner::new(PathBuf::from(std::env::var_os("HOME").unwrap_or_default())),
+            clean: Cleaner::new(crate::platform::home_dir()),
             local,
             running: Default::default(),
             usage: Default::default(),
             scanner: Arc::new(Mutex::new(Scanner::new(claude_projects()))),
             refreshing: AtomicBool::new(false),
+            meetings,
+            hardware,
+            presence,
+            voice: Voice::default(),
+            pr_checked: Mutex::new((String::new(), 0, None)),
         })
     }
 
@@ -208,6 +197,10 @@ impl Engine {
             return Err("mensagem vazia".into());
         }
         self.mind.observe_task(&text);
+        // Falar com ela no Mac conta como estar com ela em casa.
+        if conversation.as_deref().is_none_or(|c| self.presence.body_for_conversation(c).is_none()) {
+            self.presence.home_activity(usage::now());
+        }
         // Tarefa repassada por outra máquina não abre conversa aqui.
         let conversation = if machine.as_deref() == Some("local") {
             None
@@ -373,13 +366,13 @@ impl Engine {
         }
         let pid = self.running.lock().unwrap().get(id).copied();
         if let Some(pid) = pid {
-            signal_group(pid, libc::SIGINT);
+            crate::platform::stop_group(pid, false);
             // Quem ignorar o pedido educado não pode prender a fila.
             let (me, id) = (self.clone(), id.to_string());
             tokio::spawn(async move {
                 tokio::time::sleep(GRACE).await;
                 if me.running.lock().unwrap().get(&id) == Some(&pid) {
-                    signal_group(pid, libc::SIGKILL);
+                    crate::platform::stop_group(pid, true);
                 }
             });
         }
@@ -439,6 +432,9 @@ impl Engine {
             Action::Task { text, target } => {
                 let _ = self.submit(text, *target, None, self.convs.current());
             }
+            Action::Summarize { meeting } => {
+                let _ = self.summarize_meeting(meeting);
+            }
             _ => {}
         }
         Some(initiative)
@@ -492,6 +488,87 @@ impl Engine {
         self.finish(id, result);
     }
 
+    /// Resume uma reunião com o Claude. Quem chama já pediu permissão.
+    pub fn summarize_meeting(self: &Arc<Self>, id: &str) -> Result<Task, String> {
+        let m = self.meetings.get(id).ok_or("Essa reunião não existe.")?;
+        if m.segments.is_empty() {
+            return Err("A reunião não tem nada transcrito.".into());
+        }
+        let task = self.store.create(format!("Resumir reunião: {}", m.title), Target::Chat, None, self.convs.current());
+        let (me, tid, mid, prompt) = (self.clone(), task.id.clone(), m.id.clone(), m.summary_prompt());
+        tokio::spawn(async move {
+            if !me.start(&tid) {
+                return;
+            }
+            let result = me.ask(&prompt).await.map(|text| {
+                me.meetings.set_summary(&mid, text.clone());
+                Some(text)
+            });
+            me.finish(&tid, result);
+        });
+        Ok(task)
+    }
+
+    /// Fecha a reunião e, se houver texto, oferece o resumo.
+    pub fn end_meeting(&self, id: &str) -> bool {
+        let Some(m) = self.meetings.end(id, usage::now()) else { return false };
+        if !m.segments.is_empty() && m.summary.is_none() {
+            self.mind.offer_summary(&m.id, &m.title);
+        }
+        true
+    }
+
+    /// Lê o projeto mais recente, o git dele e, a cada 10 min, o PR do branch.
+    pub async fn refresh_context(self: &Arc<Self>) {
+        if !self.refreshing.swap(true, Ordering::SeqCst) {
+            self.refresh_usage(true, false).await;
+            self.refreshing.store(false, Ordering::SeqCst);
+        }
+        let project = self.usage.lock().unwrap().local.projects.iter().max_by_key(|p| p.last).cloned();
+        let Some(project) = project else { return };
+        let path = PathBuf::from(&project.path);
+        let recent = usage::now().saturating_sub(project.last) < 2 * 3600;
+        let git = if recent && path.is_dir() {
+            let p = path.clone();
+            tokio::task::spawn_blocking(move || context::git_info(&p)).await.ok().flatten()
+        } else {
+            None
+        };
+        let branch = git.as_ref().and_then(|g| g.branch.clone());
+        let failing = match branch.as_deref() {
+            Some(b) if !["main", "master", "develop"].contains(&b) => self.pr_status(&path, b).await,
+            _ => None,
+        };
+        self.mind.set_work(context::WorkInput {
+            project: Some(project.name.clone()),
+            path: Some(project.path.clone()),
+            last: project.last,
+            git,
+            failing,
+        });
+    }
+
+    async fn pr_status(&self, dir: &std::path::Path, branch: &str) -> Option<context::FailingPr> {
+        let key = format!("{}#{branch}", dir.display());
+        {
+            let c = self.pr_checked.lock().unwrap();
+            if c.0 == key && usage::now().saturating_sub(c.1) < 600 {
+                return c.2.clone();
+            }
+        }
+        let out = tokio::time::timeout(
+            Duration::from_secs(20),
+            Command::new(find_gh()).current_dir(dir).args(["pr", "view", "--json", "number,url,statusCheckRollup"]).stdin(Stdio::null()).kill_on_drop(true).output(),
+        )
+        .await;
+        let failing = match out {
+            Ok(Ok(o)) if o.status.success() => context::failing_pr(&String::from_utf8_lossy(&o.stdout)),
+            _ => None,
+        };
+        *self.pr_checked.lock().unwrap() = (key, usage::now(), failing.clone());
+        failing
+    }
+
     /// Uma pergunta avulsa ao Claude, sem ferramentas e sem conversa.
     async fn ask(&self, prompt: &str) -> Result<String, String> {
         let brain = self.factory.settings().brain_model;
@@ -537,10 +614,11 @@ impl Engine {
         } else {
             format!(" Agentes da sua fábrica: {roster}. Para passar uma tarefa a um deles, responda SOMENTE com `@@delegar agente: <nome>: <tarefa>`.")
         };
+        let place = self.presence_prompt(&conv);
         let system = if delegate {
-            format!("{base}{memory}{BRAIN_DELEGATE}{roster}")
+            format!("{base}{memory}{BRAIN_DELEGATE}{roster}{place}")
         } else {
-            format!("{base}{memory}")
+            format!("{base}{memory}{place}")
         };
         // O cérebro só conversa e delega: quem executa é o agente, então Opus aqui seria desperdício.
         let model = if me.brain_model == AUTO { self.router.choose(&conv, Need { ceiling: 1, ..Need::plain(text) }).model } else { me.brain_model.as_str() };
@@ -616,6 +694,10 @@ impl Engine {
                     }
                 });
             }
+            Some((Dest::Presence(place), text)) => {
+                let result = self.go(&place, &text).map(|b| Some(format!("Fui até a {} e falei: \"{text}\"", b.room)));
+                self.finish(id, result);
+            }
             None => self.finish(id, Ok(Some(out.text))),
         }
     }
@@ -663,6 +745,9 @@ impl Engine {
     /// O `--cloud` só aceita rodar num terminal, então ganha um pseudo-terminal.
     /// Com o link em mãos a sessão já existe na nuvem e o processo local sai.
     pub(crate) async fn open_cloud(&self, id: &str, prompt: &str) -> Result<String, String> {
+        if cfg!(windows) {
+            return Err("Agentes na nuvem ainda não funcionam no Windows: o `--cloud` precisa de um terminal Unix. Use o Mac ou /pc.".into());
+        }
         let mut cmd = claude_cmd(&PathBuf::from("/usr/bin/script"));
         cmd.current_dir(self.paths.workspace())
             .args(["-q", "/dev/null"])
@@ -700,7 +785,7 @@ impl Engine {
         let url = tokio::time::timeout(Duration::from_secs(90), read).await;
         self.running.lock().unwrap().remove(id);
         if let Some(pid) = pid {
-            signal_group(pid, libc::SIGKILL);
+            crate::platform::stop_group(pid, true);
         }
         let text = route::clean_tty(&String::from_utf8_lossy(&raw));
         match url {
@@ -786,7 +871,7 @@ impl Engine {
         let status = status.unwrap_or(Err(std::io::ErrorKind::TimedOut.into()));
         let pid = self.running.lock().unwrap().remove(id);
         if let Some(pid) = pid {
-            signal_group(pid, libc::SIGKILL);
+            crate::platform::stop_group(pid, true);
         }
         let stderr = tokio::time::timeout(GRACE, err_task)
             .await
@@ -1004,6 +1089,7 @@ const CLOUD_SETUP: &str = "Falta configurar o Claude CLI para a nuvem. No termin
 
 const GRACE: Duration = Duration::from_secs(2);
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t) -> libc::size_t;
 }
@@ -1011,13 +1097,10 @@ unsafe extern "C" {
 /// Ler 1 GB de logs deixa buffers livres retidos pelo alocador; devolve ao sistema.
 fn release_memory() {
     // SAFETY: zona nula = todas as zonas; objetivo 0 = liberar o que puder.
+    #[cfg(target_os = "macos")]
     unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
 }
 
-fn signal_group(pid: i32, sig: i32) {
-    // SAFETY: `pid` lidera um grupo criado por nós (`process_group(0)`).
-    unsafe { libc::kill(-pid, sig) };
-}
 
 fn tail(text: &str) -> String {
     let start = text.len().saturating_sub(800);

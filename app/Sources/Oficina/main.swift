@@ -22,6 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var hotKey: EventHotKeyRef?
     private var clipKey: EventHotKeyRef?
     let tools = Tools()
+    private let calls = CallWatcher()
+    private let agenda = Agenda()
+    private var deviceVoice: DeviceVoice!
+    private var listener: CallListener!
 
     func applicationDidFinishLaunching(_ note: Notification) {
         if CommandLine.arguments.contains("--testar-dock-sistema") {
@@ -37,6 +41,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pet.onEvent = { [weak self] kind in self?.core.mindEvents([["kind": kind]]) }
         bubble = BubbleController(anchor: pet.window)
         bubble.model.answer = { [weak self] initiative, accepted in self?.answer(initiative, accepted) }
+        bubble.model.never = { [weak self] initiative in
+            self?.bubble.ask(nil)
+            self?.core.never(initiative.id)
+        }
         pet.busy = { [weak self] in self?.bubble.model.initiative != nil }
         pet.view.onMenu = { [weak self] event in self?.showMenu(event) }
         let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Oficina")
@@ -85,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .sink { [weak self] s in
                 MainActor.assumeIsolated {
                     FaiscaAvatar.bodyColor = colorFromHex(s.body_color)
+                    AppDelegate.bodyHex = s.body_color
                     FaiscaAvatar.sparkColor = colorFromHex(s.spark_color)
                     self?.pet.figure.customize(s)
                     self?.mindPanel?.title = "Mente de \(s.name)"
@@ -97,6 +106,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .sink { [weak self] brief in MainActor.assumeIsolated { self?.mindChanged(brief) } }
             .store(in: &bag)
         watchPresence()
+        watchCalls()
+        watchPresence2()
         core.start()
         if CommandLine.arguments.contains("--abrir-mente") { openMind() }
         if CommandLine.arguments.contains("--abrir-fabrica") {
@@ -104,6 +115,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.openFactory() }
         }
         if CommandLine.arguments.contains("--abrir-limpeza") { openCleaner() }
+        if CommandLine.arguments.contains("--abrir-hardware") { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.openHardware() } }
+        if CommandLine.arguments.contains("--abrir-reunioes") { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.openMeetings() } }
         if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--abrir-barra") }) {
             if let tab = arg.split(separator: "=").dropFirst().first { tools.tab = String(tab) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showBarPanel() }
@@ -201,6 +214,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.reportPresence(includeFocus: true) }
     }
 
+    // MARK: Presença única
+
+    private func watchPresence2() {
+        deviceVoice = DeviceVoice(core: core)
+        core.onVoice = { [weak self] job in self?.deviceVoice.handle(job) }
+        core.$presence
+            .receive(on: RunLoop.main)
+            .removeDuplicates()
+            .sink { [weak self] p in MainActor.assumeIsolated { self?.presenceChanged(p) } }
+            .store(in: &bag)
+    }
+
+    private var lastPresence: PresenceData?
+
+    private func presenceChanged(_ p: PresenceData?) {
+        guard let p else { return }
+        defer { lastPresence = p }
+        guard p.away != (lastPresence?.away ?? false) else { return }
+        if p.away {
+            // Avisa e sai: ela está na caixa de som agora.
+            pet.say("Fui à \(p.room).", force: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard self?.core.presence?.away == true else { return }
+                self?.pet.setAway(true)
+            }
+        } else {
+            pet.setAway(false)
+            pet.comeOut()
+        }
+    }
+
+    @objc private func callBackNow() {
+        Task { _ = await core.callPresence(force: true) }
+    }
+
+    @objc private func openDevices() {
+        openTool("dispositivos", title: "Dispositivos", size: NSSize(width: 680, height: 600), DevicesView(core: core, tint: colorFromHex(core.settings.body_color)))
+    }
+
+    // MARK: Chamadas
+
+    /// Percebe chamadas pelo microfone e, se você deixar, ouve e anota.
+    private func watchCalls() {
+        listener = CallListener(core: core)
+        listener.onChange = { [weak self] on in
+            guard let self else { return }
+            self.pet.wear(on ? Self.withHeadset(self.lastBrief?.outfit) : self.lastBrief?.outfit)
+        }
+        calls.onStart = { [weak self] app in
+            self?.core.mindEvents([["kind": "call_start", "bundle": app.bundle, "name": app.name]])
+        }
+        calls.onEnd = { [weak self] _ in
+            self?.core.mindEvents([["kind": "call_end"]])
+            if self?.listener.active == true {
+                self?.listener.stop()
+                self?.pet.say("A chamada acabou. Guardei as anotações.", force: true)
+            }
+        }
+        calls.start()
+        agenda.onEvents = { [weak self] events in self?.core.mindEvents(events) }
+        // Espera o core conectar antes da primeira leitura.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.agenda.start() }
+    }
+
+    @objc private func toggleAgenda() {
+        let on = !agenda.enabled
+        Task {
+            let ok = await agenda.setEnabled(on)
+            if on {
+                pet.say(ok ? "Agora eu vejo os horários da sua agenda. Te aviso antes das reuniões." : "Sem acesso ao Calendário. Dá para liberar em Ajustes do Sistema > Privacidade.", force: true)
+            }
+        }
+    }
+
+    /// Enquanto ouve, ela usa fones: dá para ver de longe que está ouvindo.
+    private static func withHeadset(_ o: OutfitData?) -> OutfitData {
+        let none = OutfitPiece(shape: "none", color: "#333333")
+        return OutfitData(
+            id: "ouvindo", name: o?.name ?? "Ouvindo", theme: o?.theme ?? "", body: o?.body ?? AppDelegate.bodyHex,
+            head: OutfitPiece(shape: "headset", color: "#222222"),
+            face: o?.face ?? none, neck: o?.neck ?? none,
+            badge: OutfitPiece(shape: "REC", color: "#E5484D"), prop: o?.prop ?? "none"
+        )
+    }
+
+    private static var bodyHex = "#FF9E29"
+
+    private func listen(_ i: InitiativeData) {
+        guard let app = calls.current else {
+            pet.say("A chamada já acabou.", force: true)
+            return
+        }
+        let processes = calls.processObjects(of: app)
+        Task {
+            if let note = await listener.start(app: app, processes: processes, title: agenda.current() ?? "") {
+                pet.say(note, force: true)
+            } else {
+                pet.say("Tô ouvindo e anotando. Para parar, clique com o botão direito em mim.", force: true)
+            }
+        }
+    }
+
+    @objc private func stopListening() {
+        listener.stop()
+        pet.say("Parei de ouvir.", force: true)
+    }
+
     private func reportPresence(includeFocus: Bool = false) {
         let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
         let running = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap(\.bundleIdentifier)
@@ -218,7 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let brief else { return }
         defer { lastBrief = brief }
         pet.setMind(brief.mood, sleeping: brief.sleeping)
-        if brief.outfit != lastBrief?.outfit { pet.wear(brief.outfit) }
+        if brief.outfit != lastBrief?.outfit { pet.wear(listener?.active == true ? Self.withHeadset(brief.outfit) : brief.outfit) }
         if let d = brief.decor, d != lastBrief?.decor { pet.figure.setDecor(d) }
         if brief.initiative != lastBrief?.initiative {
             if let i = brief.initiative {
@@ -228,7 +348,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 bubble.ask(nil)
             }
         }
-        if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, !brief.sleeping, brief.mood != "focada" {
+        if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, pet.away {
+            // Longe, os recados chegam num balão sem ela.
+            bubble.note("\(core.settings.name), na \(core.presence?.room ?? "sala"): \(t.text)")
+        } else if let t = brief.thought, t != lastBrief?.thought, lastBrief != nil, !brief.sleeping, brief.mood != "focada" {
             let important = t.text.hasPrefix("Olha minha") || t.text.hasPrefix("Anotado") || t.text.hasPrefix("Modo ")
             pet.say(t.text, force: important)
         }
@@ -256,6 +379,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 pet.say("Já volto com a roupa nova!", force: true)
             case "task":
                 pet.say("Mandei um agente pesquisar. Te aviso.", force: true)
+            case "listen":
+                listen(done)
+            case "summarize":
+                pet.say("Resumindo a reunião. O resumo aparece no chat.", force: true)
             default:
                 break
             }
@@ -315,6 +442,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func openFactory() {
         openTool("fabrica", title: "Fábrica", size: NSSize(width: 920, height: 640), FactoryView(core: core) { [weak self] conv in
+            self?.core.select(conv)
+            self?.openChat()
+        })
+    }
+
+    @objc private func openMeetings() {
+        openTool("reunioes", title: "Reuniões", size: NSSize(width: 860, height: 600), MeetingsView(core: core, tint: colorFromHex(core.settings.body_color)))
+    }
+
+    @objc private func openHardware() {
+        openTool("hardware", title: "Oficina de hardware", size: NSSize(width: 1040, height: 680), HardwareView(core: core, tint: colorFromHex(core.settings.body_color)) { [weak self] conv in
             self?.core.select(conv)
             self?.openChat()
         })
@@ -516,61 +654,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) { popover = nil }
 
+    /// O menu da Faísca (botão direito nela ou no ícone da barra): ela no topo,
+    /// depois o que fazer agora, onde ela está, a Oficina e os ajustes.
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
-        let chat = NSMenuItem(title: "Conversar", action: #selector(openChat), keyEquivalent: " ")
-        chat.keyEquivalentModifierMask = [.control, .option]
-        chat.target = self
-        menu.addItem(chat)
-        let ask = NSMenuItem(title: "Pedir melhoria…", action: #selector(askImprovement), keyEquivalent: "")
-        ask.target = self
-        menu.addItem(ask)
-        let bed = NSMenuItem(title: "Colocar para dormir", action: #selector(putToBed), keyEquivalent: "")
-        bed.target = self
-        menu.addItem(bed)
-        let factory = NSMenuItem(title: "Fábrica de agentes…", action: #selector(openFactory), keyEquivalent: "")
-        factory.target = self
-        menu.addItem(factory)
-        let cleaner = NSMenuItem(title: "Limpeza do Disco…", action: #selector(openCleaner), keyEquivalent: "")
-        cleaner.target = self
-        menu.addItem(cleaner)
-        let utilities = NSMenuItem(title: "Painel da barra de menus", action: #selector(openTools), keyEquivalent: "")
-        utilities.target = self
-        menu.addItem(utilities)
-        let personalize = NSMenuItem(title: "Personalizar…", action: #selector(openPersonalize), keyEquivalent: "")
-        personalize.target = self
-        menu.addItem(personalize)
-        let mind = NSMenuItem(title: "Mente de \(core.settings.name)…", action: #selector(openMind), keyEquivalent: "")
-        mind.target = self
-        menu.addItem(mind)
-        let suggest = NSMenuItem(title: "Me sugere algo", action: #selector(suggestNow), keyEquivalent: "")
-        suggest.target = self
-        menu.addItem(suggest)
-        let dockItem = NSMenuItem(title: "Dock", action: nil, keyEquivalent: "")
+        let name = core.settings.name
+        let tint = colorFromHex(core.settings.body_color)
+        let p = core.presence
+        let listening = listener?.active == true
+        let place = p?.away == true ? "Na \(p?.room ?? "")" : "No Mac, com você"
+        let status: String? = listening ? "Ouvindo a chamada" : core.mind?.call.map { "Em chamada no \($0)" }
+        menu.addItem(menuHeader(MenuHeader(name: name, mood: core.mind?.mood ?? "", sleeping: core.mind?.sleeping ?? false,
+                                           place: place, status: status, listening: listening, tint: tint)))
+        menu.addItem(.separator())
+
+        menu.addItem(menuItem("Conversar", "bubble.left.and.bubble.right", self, #selector(openChat), key: " ", modifiers: [.control, .option]))
+        menu.addItem(menuItem("Me sugere algo", "sparkles", self, #selector(suggestNow)))
+        if listening {
+            menu.addItem(menuItem("Parar de ouvir a chamada", "stop.circle", self, #selector(stopListening)))
+        }
+        if p?.away == true {
+            menu.addItem(menuItem("Chamar de volta agora", "arrow.uturn.backward.circle", self, #selector(callBackNow)))
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(menuSection("Onde ela está"))
+        let go = menuItem("Ir para", "location", self, #selector(noop))
+        let goMenu = NSMenu()
+        let mac = menuItem("Mac", "laptopcomputer", self, #selector(goTo(_:)), on: p?.away != true)
+        mac.representedObject = "casa"
+        goMenu.addItem(mac)
+        for b in p?.bodies ?? [] {
+            let item = menuItem(b.kind == "pc" ? b.name : b.room, b.kind == "pc" ? "laptopcomputer" : "hifispeaker", self, #selector(goTo(_:)), on: p?.holder == b.id)
+            item.representedObject = b.id
+            item.isEnabled = b.online
+            if !b.online { item.title = "\(b.room) (desligada)" }
+            goMenu.addItem(item)
+        }
+        go.submenu = goMenu
+        go.action = nil
+        menu.addItem(go)
+        menu.addItem(menuItem("Dispositivos…", "hifispeaker.2", self, #selector(openDevices)))
+        menu.addItem(menuItem("Reuniões…", "text.bubble", self, #selector(openMeetings)))
+
+        menu.addItem(.separator())
+        menu.addItem(menuSection("Oficina"))
+        menu.addItem(menuItem("Fábrica de agentes…", "person.3", self, #selector(openFactory)))
+        menu.addItem(menuItem("Oficina de hardware…", "cpu", self, #selector(openHardware)))
+        menu.addItem(menuItem("Limpeza do Disco…", "externaldrive", self, #selector(openCleaner)))
+        menu.addItem(menuItem("Painel da barra de menus", "menubar.rectangle", self, #selector(openTools)))
+
+        menu.addItem(.separator())
+        menu.addItem(menuSection(name))
+        menu.addItem(menuItem("Mente de \(name)…", "brain", self, #selector(openMind)))
+        menu.addItem(menuItem("Personalizar…", "paintpalette", self, #selector(openPersonalize)))
+        menu.addItem(menuItem("Colocar para dormir", "moon.zzz", self, #selector(putToBed)))
+        menu.addItem(menuItem("Usar a agenda", "calendar", self, #selector(toggleAgenda), on: agenda.enabled))
+        let dockItem = menuItem("Dock", "dock.rectangle", self, #selector(noop))
+        dockItem.action = nil
         let dockMenu = NSMenu()
-        let showDock = NSMenuItem(title: "Mostrar Dock", action: #selector(toggleDock), keyEquivalent: "")
-        showDock.target = self
-        showDock.state = dock.enabled ? .on : .off
-        dockMenu.addItem(showDock)
-        let replace = NSMenuItem(title: "Substituir a Dock do macOS", action: #selector(toggleReplace), keyEquivalent: "")
-        replace.target = self
-        replace.state = dock.replacingSystemDock ? .on : .off
-        dockMenu.addItem(replace)
+        dockMenu.addItem(menuItem("Mostrar Dock", "eye", self, #selector(toggleDock), on: dock.enabled))
+        dockMenu.addItem(menuItem("Substituir a Dock do macOS", "rectangle.2.swap", self, #selector(toggleReplace), on: dock.replacingSystemDock))
         dockMenu.addItem(.separator())
+        dockMenu.addItem(menuSection("Ambientes"))
         for (i, env) in dock.store.envs.enumerated() {
-            let item = NSMenuItem(title: env.title, action: #selector(pickEnvironment(_:)), keyEquivalent: i < 9 ? "\(i + 1)" : "")
-            item.keyEquivalentModifierMask = [.control, .option]
-            item.target = self
-            item.tag = i
-            item.state = i == dock.store.active ? .on : .off
+            let item = menuItem(env.title, "square.grid.2x2", self, #selector(pickEnvironment(_:)), key: i < 9 ? "\(i + 1)" : "",
+                                modifiers: [.control, .option], on: i == dock.store.active, tag: i)
             dockMenu.addItem(item)
         }
         dockItem.submenu = dockMenu
         menu.addItem(dockItem)
+
         menu.addItem(.separator())
+        menu.addItem(menuItem("Pedir melhoria…", "lightbulb", self, #selector(askImprovement)))
         let quit = NSMenuItem(title: "Sair da Oficina", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
         menu.addItem(quit)
         return menu
+    }
+
+    @objc private func noop() {}
+
+    @objc private func goTo(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        if id == "casa" {
+            Task { _ = await core.callPresence(force: true) }
+        } else {
+            Task { _ = await core.movePresence(to: id, text: "Oi! Cheguei.") }
+        }
     }
 
     private func showMenu(_ event: NSEvent) {
@@ -599,6 +770,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func openChat() {
         if !panel.isVisible { togglePanel() }
+        // Ela está em outro cômodo: abrir a conversa é chamá-la (pesando a conversa de lá).
+        if core.presence?.away == true {
+            Task { _ = await core.callPresence(force: false) }
+        }
     }
 
     /// ⌃⌥Espaço abre e fecha a conversa de qualquer lugar.

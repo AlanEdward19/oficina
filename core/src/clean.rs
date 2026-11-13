@@ -7,7 +7,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::Read,
-    os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     process::Command,
     sync::Mutex,
@@ -119,7 +118,7 @@ pub struct Cleaner {
 
 /// Espaço de verdade em disco, não o tamanho lógico.
 fn disk_bytes(m: &fs::Metadata) -> u64 {
-    m.blocks() * 512
+    crate::platform::disk_size(m)
 }
 
 fn walk(root: &Path, skip: &dyn Fn(&Path, &str) -> bool, visit: &mut dyn FnMut(&Path, &fs::Metadata)) {
@@ -182,7 +181,7 @@ fn belongs(bundle: &str, installed: &HashSet<String>) -> bool {
 
 fn days_since(m: &fs::Metadata) -> u64 {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    now.saturating_sub(m.atime().max(m.mtime()) as u64) / DAY
+    now.saturating_sub(unix_secs(m.accessed()).max(unix_secs(m.modified())) as u64) / DAY
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
@@ -378,8 +377,8 @@ impl Cleaner {
         let mut inodes = HashSet::new();
         for root in PERSONAL {
             walk(&self.home.join(root), &personal_skip, &mut |p, m| {
-                if m.len() >= DUPLICATE_MIN && inodes.insert((m.dev(), m.ino())) {
-                    by_size.entry(m.len()).or_default().push((p.to_path_buf(), m.mtime()));
+                if m.len() >= DUPLICATE_MIN && crate::platform::file_id(&m).is_none_or(|id| inodes.insert(id)) {
+                    by_size.entry(m.len()).or_default().push((p.to_path_buf(), unix_secs(m.modified())));
                 }
             });
         }
@@ -621,6 +620,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn atalho_nao_leva_para_fora() {
         let h = home("atalho");
         let fora = home("atalho-fora");
@@ -690,4 +690,9 @@ mod tests {
         assert!(c.map(Some("/etc")).is_err());
         assert!(c.map(Some(&format!("{}/../..", h.display()))).is_err());
     }
+}
+
+/// Data de acesso ou modificação em segundos Unix, em qualquer sistema.
+fn unix_secs(t: std::io::Result<std::time::SystemTime>) -> i64 {
+    t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0)
 }

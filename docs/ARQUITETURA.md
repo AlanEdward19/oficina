@@ -64,6 +64,14 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 | `GET/POST /v1/settings`, `GET /v1/factory` | Ajustes da assistente; agentes e equipes |
 | `POST /v1/agents`, `DELETE /v1/agents/{id}`, `POST …/missions`, `POST …/team` | Agentes e missões |
 | `POST /v1/teams`, `DELETE /v1/teams/{id}` | Equipes |
+| `GET /v1/meetings`, `POST /v1/meetings`, `GET/DELETE /v1/meetings/{id}` | Reuniões transcritas |
+| `POST /v1/meetings/{id}/segments`, `…/end`, `…/summarize` | Falas, fim e resumo (o resumo gasta tokens) |
+| `POST /v1/mind/initiatives/{id}/never` | "Nunca neste app" na pergunta da chamada |
+| `GET/POST /v1/hardware`, `GET/DELETE /v1/hardware/{id}` | Projetos da Oficina de hardware |
+| `GET /v1/hardware/{id}/diagram`, `POST /v1/hardware/{id}/run/{sim\|build\|erc\|firmware}`, `POST /v1/hardware/setup` | Simular, modelar e checar sem tokens; instalar o CAD |
+| `GET /v1/presence`, `POST /v1/presence/move`, `POST /v1/presence/call` | Onde ela está, levar, chamar (`force`) |
+| `POST /v1/bodies/auto`, `POST /v1/bodies/network`, `POST/DELETE /v1/bodies/{id}` | Aceite automático, porta, renomear e esquecer dispositivos |
+| `GET/POST /v1/voice/{id}`, `POST /v1/voice/{id}/text` | O Mac sintetiza e transcreve para os dispositivos |
 | `GET /v1/events` | SSE com `{kind: task\|delta\|usage\|resync}` |
 
 ## Conversas
@@ -99,8 +107,13 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 
 Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
 
-- **Sentidos:** app em foco (só o nome), tempo sem mexer no Mac, tarefas, gestos no pet, troca de ambiente.
-  Nunca títulos de janela nem conteúdo de tela.
+- **Sentidos:** app em foco (só o nome), tempo sem mexer no Mac, tarefas, gestos no pet, troca de ambiente,
+  chamadas (qual app usa o microfone). Nunca títulos de janela nem conteúdo de tela.
+- **Contexto de trabalho** (`mind/context.rs`): a cada 2 minutos o core pega o projeto mais recente do Claude Code,
+  lê o git dele (branch, quantos arquivos sem commit, assuntos dos últimos commits, linguagens pelos nomes dos
+  arquivos) e, fora de `main`, o PR do branch com o `gh`, no máximo a cada 10 minutos. Por regras, sem tokens,
+  deduz a atividade (programando, revisando, reunião, lendo, pausa). Vai para o resumo do cérebro e para o
+  diário do dia (tempo por projeto e em reunião, só números).
 - **Rede:** 12 canais → 49 interneurônios de disparo (integra e dispara, com vazamento) → 7 impulsos
   (alegria, curiosidade, tédio, cansaço, carência, foco, iniciativa). Os pesos iniciais seguem afinidades
   desenhadas à mão; os pesos interneurônio → impulso aprendem por recompensa (carinho, iniciativas aceitas
@@ -112,6 +125,94 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
   (se o assunto é IA), abrir um app do seu horário, pausa depois de 1h30 de trabalho ou pesquisa na nuvem
   sobre um interesse. Um bandit aprende o que você aceita. Tudo que gasta tokens pergunta antes.
 - **Roupinhas:** o Claude escolhe peças de um vocabulário fixo e cores; o app só desenha o que é válido.
+- **Iniciativas de trabalho:** CI vermelho no PR do branch atual (oferece um agente para investigar), 2h sem commit
+  com arquivos alterados e o diário no fim do dia. Durante uma chamada nenhuma iniciativa aparece.
+
+## Chamadas e reuniões
+
+- **Detectar** (`Call.swift`): o Core Audio avisa quando o microfone padrão liga; enquanto ele está ligado, a cada
+  3 s o app lê os processos de áudio (`kAudioHardwarePropertyProcessObjectList`) e qual deles captura entrada.
+  O bundle do processo é comparado com uma lista de apps de chamada (Zoom, Discord, Teams, WhatsApp, FaceTime,
+  Slack, Webex, Skype) e navegadores (Meet). 10 s seguidos começam a chamada; 20 s sem ela, terminam.
+- **Perguntar:** o core cria a pergunta "Quer que eu ouça e anote?" com três respostas: Ouvir, Agora não e
+  "Nunca no Zoom", que fica guardado. Vale 60 s.
+- **Ouvir** (`Listen.swift`): o microfone (AVAudioEngine) vira "Você"; um *process tap* do Core Audio só nos processos
+  do app da chamada (macOS 14.2+, permissão "Gravação de áudio do sistema", não de tela) vira "Outros". Cada
+  fonte passa pelo `SpeechAnalyzer` + `SpeechTranscriber` no macOS 26 (o modelo de português é baixado uma vez pelo
+  sistema) ou, antes dele, pelo `SFSpeechRecognizer` no Mac (`requiresOnDeviceRecognition`); sem reconhecimento
+  local, ela não ouve. O código do macOS 26 só entra quando o app é compilado com Xcode 26 (`#if compiler(>=6.2)`). Pedaços de 25 s viram falas no core. O áudio nunca é gravado. Enquanto ouve, a
+  Faísca usa fones com um selo REC, e o menu dela ganha "Parar de ouvir a chamada".
+- **Agenda** (`Agenda.swift`, desligada até você ligar "Usar a agenda" no menu): o app manda à mente só título,
+  início e fim dos eventos das próximas horas. Ela avisa uma vez quando faltam 10 minutos, dá nome à pergunta da
+  chamada ("Entrou na reunião Daily no Zoom") e às anotações, e o cérebro sabe o que vem a seguir.
+- **Guardar:** `reunioes/<id>.json`, com as falas. No fim da chamada ela oferece o resumo (decisões, tarefas e
+  dúvidas), que gasta tokens. "Esquecer tudo" apaga as reuniões.
+
+## Presença única
+
+- **Uma Faísca, um lugar.** A mente fica no core do Mac ("casa"). Dispositivos são corpos (`presence.rs`); só quem tem a
+  posse de presença fala e ouve. Ir para outro lugar manda "saiu" ao anterior e "chegou" ao novo.
+- **Sem pareamento.** O core abre uma porta só para dispositivos (`body_listen`, `0.0.0.0:7879`) e responde ao
+  broadcast UDP `oficina?` com `oficina:<porta>:<nome>`. A caixa se apresenta (`/v1/body/hello`) com o endereço MAC e,
+  com "Aceitar dispositivos sozinha" ligado (o padrão), entra na hora e recebe um token só dela; a Faísca avisa. O mesmo
+  aparelho, regravado, volta como o mesmo dispositivo com token novo. Lá só existem as rotas `/v1/body/*`; a API
+  principal continua só no localhost. O risco: qualquer aparelho da rede pode se apresentar. Por isso as duas chaves
+  em Dispositivos, o "Esquecer", e o que gasta ou mexe no Mac continua pedindo aprovação. O código de 6 dígitos
+  (`/v1/bodies/pairing`) fica para quem desligar o aceite automático.
+- **Voz:** o core pede ao app do Mac a fala sintetizada (`AVSpeechSynthesizer`, WAV 16 kHz) e a transcrição do que a
+  caixa gravou (`SFSpeechRecognizer` no Mac). Os áudios ficam só na memória, no máximo 30 ou 24 MB. Sem o app, a caixa
+  recebe só o texto.
+- **Conversa no cômodo:** cada dispositivo tem sua conversa. O cérebro sabe onde ela está, fala curto quando é por voz e
+  pode ir até outro cômodo com `@@delegar presenca: <cômodo>: <fala>`. As respostas são faladas lá, e a caixa ouve a
+  réplica.
+- **Ocupada:** você chamando (abrir a conversa ou "Chamar de volta"), ela pesa a conversa de lá: com um pedido em
+  andamento, fica e te avisa; com conversa viva, avisa e vem em até 20 s; parada, vem. "Vem agora" (`force`) sempre traz,
+  com uma despedida no jeito da personalidade. Sozinha, ela volta após 90 s de silêncio ou se o dispositivo sumir.
+- **Botão da caixa:** chama a Faísca para lá, a não ser que você esteja falando com ela no Mac; aí ela te avisa.
+- Firmware e simulador em `devices/caixa/`.
+
+## Windows e Linux
+
+- O core compila nos três sistemas; o que muda fica em `core/src/platform.rs` (pasta de dados, aleatoriedade, hora local,
+  nome da máquina, grupos de processos, programas no PATH com `.exe`/`.cmd`). No Windows os dados ficam em
+  `%APPDATA%\Oficina`. Agentes na nuvem (`--cloud`) ainda não funcionam no Windows, porque precisam de terminal Unix.
+- `desktop/` é o app para Windows e Linux, em Rust (tao, wry, tray-icon): o pet numa janela transparente sempre no topo,
+  a conversa numa janela comum e o ícone na bandeja. As telas são páginas servidas pelo próprio core em `/ui/`
+  (`core/ui/`), sem segredo; o app injeta o token.
+- **Dock no Windows** (`desktop/src/dock.rs`): a mesma ideia da Dock do Mac. Ambientes (Trabalho, Pessoal) com apps
+  fixados, o ícone de verdade de cada programa (tirado do atalho do Menu Iniciar pelo Shell do Windows e enviado como
+  PNG), "+" para escolher entre os apps instalados, clique para abrir, botão direito para tirar e a casinha da Faísca
+  no fim, que abre a conversa. Fica embaixo, no centro, acima da barra de tarefas, e a janela tem só o tamanho da
+  barra para não roubar cliques. Guardada em `dock.json`. "Mostrar Dock" na bandeja liga e desliga. A barra de tarefas
+  do Windows continua lá: substituí-la, como no Mac, fica para depois.
+- **Tudo pelo Wi-Fi.** Ao abrir, o app grita `oficina?` na rede. Se outra Oficina responde (o Mac), este computador vira
+  um corpo da mesma Faísca (tipo `pc`), sem pareamento: o pet só aparece quando ela vem para cá, a conversa vai para a
+  mente no Mac e as respostas são faladas com a voz do Windows. Se ninguém responde, o app liga o `oficinad` local e a
+  Faísca mora ali.
+- `scripts/build-windows.sh` gera `build/Oficina-Windows.zip` (no Windows ou por compilação cruzada com mingw-w64); o CI
+  tem um job no Windows que roda os testes do core e publica o pacote como artefato.
+
+## Oficina de hardware
+
+- Cada projeto é uma pasta em `hardware/<id>/` com um esqueleto: `requisitos.md`, `pesquisa.md`,
+  `eletrica/diagrama.mmd` e `mapa.md`, `especificacao.json`, `mecanica/modelo.py`, `montagem.md`, `firmware/`.
+- Criar um projeto cria um agente `HW-<id>` com esse papel e começa a missão de quatro etapas. A etapa Executar
+  espera aprovação, como as outras missões.
+- O agente não tem shell livre: além das ferramentas da missão, só `oficinad hw sim|build|erc|bom`, que só roda
+  dentro de uma pasta de projeto. Nas etapas de leitura ele ganha também WebSearch, WebFetch e `hw sim`.
+- `hw sim` calcula, sem tokens e sem dependências, autonomia (bateria × margem ÷ corrente média dos modos), peso e
+  centro de massa, custo e calor (ΔT = P / (h · A)), e gera `simulacoes/resultado.md`, `resultado.json` e `bom.csv`.
+- `hw build` roda `mecanica/modelo.py` (build123d) num ambiente Python só da Oficina (`hardware/.env`,
+  instalado pela tela, cerca de 2 GB). O ajudante `oficina_cad.py` exporta um STL por peça, `montagem.step`, massa
+  pelo material e as interferências entre peças, que entram nas simulações como "Encaixe".
+- `hw erc` compila o esquemático com atopile ou roda o ERC do KiCad, se algum estiver instalado.
+- `hw firmware` compila `firmware/platformio.ini` com o PlatformIO do ambiente da Oficina e, se houver
+  `firmware/renode.resc`, roda 5 s no Renode sem janela, com `$bin` (o ELF) e `$uart` (o log serial). Cada linha de
+  `firmware/esperado.txt` precisa aparecer na serial; o resultado entra nas simulações como "Firmware". O Renode
+  emula Cortex-M e RISC-V; o ESP32-S3 (Xtensa) só compila.
+- O diagrama de blocos (`eletrica/diagrama.mmd`) é lido pelo core (`hardware/diagram.rs`): blocos, setas e rótulos,
+  em camadas pelo maior caminho. O app desenha no Canvas, sem navegador; `GET /v1/hardware/{id}/diagram`.
+- A tela mostra o pacote em abas e o modelo 3D em SceneKit (STL via ModelIO), com vista explodida.
 
 ## Dock
 
@@ -161,4 +262,7 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
    alternador de janelas, layout de janelas, mixer de áudio, captura de tela, limpeza.
 4. **Pet com vida:** emoções e aprendizado no core, inspirados nas ideias do Pestinha.
 5. **Dispositivos:** rede via Tailscale, celular, painel touchscreen, Alexa.
-6. **Oficina de hardware:** ideia → pesquisa → protótipo → modelo 3D, com agentes especializados.
+6. **Oficina de hardware** (primeira versão feita): ideia → pesquisa → protótipo → modelo 3D, com agentes especializados.
+
+Estudos: [Faísca atenta ao trabalho e às chamadas](estudos/contexto-e-chamadas.md),
+[Oficina de hardware](estudos/oficina-de-hardware.md) e [Faísca em todo lugar](estudos/faisca-em-todo-lugar.md).

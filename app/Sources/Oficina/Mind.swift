@@ -40,6 +40,7 @@ struct InitiativeAction: Decodable, Equatable {
     let name: String?
     let theme: String?
     let text: String?
+    let meeting: String?
 }
 
 struct InitiativeData: Decodable, Equatable, Identifiable {
@@ -49,6 +50,8 @@ struct InitiativeData: Decodable, Equatable, Identifiable {
     let accept: String
     let decline: String
     let action: InitiativeAction
+    /// Terceira resposta, como "Nunca no Zoom".
+    let never: String?
 }
 
 struct MindBrief: Decodable, Equatable {
@@ -58,6 +61,22 @@ struct MindBrief: Decodable, Equatable {
     let initiative: InitiativeData?
     let outfit: OutfitData?
     let decor: DecorData?
+    /// App da chamada em andamento.
+    let call: String?
+}
+
+/// O que ela entende que você está fazendo agora.
+struct WorkContextData: Decodable {
+    let project: String?
+    let branch: String?
+    let languages: [String]
+    let activity: String
+    let since: UInt64
+    let dirty: Int
+    let subjects: [String]
+    let call: String?
+    let pending: [String]
+    let agenda: String?
 }
 
 struct NamedValue: Decodable {
@@ -103,6 +122,8 @@ struct MindSnapshot: Decodable {
     let outfits: [OutfitData]
     let decor: DecorData?
     let decors: [DecorData]?
+    let context: WorkContextData?
+    let today: String?
 }
 
 private let driveLabels: [String: String] = [
@@ -126,6 +147,7 @@ final class BubbleModel: ObservableObject {
     @Published var text: String?
     @Published var initiative: InitiativeData?
     var answer: (InitiativeData, Bool) -> Void = { _, _ in }
+    var never: (InitiativeData) -> Void = { _ in }
 }
 
 struct BubbleView: View {
@@ -140,6 +162,11 @@ struct BubbleView: View {
                     Button(i.decline) { model.answer(i, false) }
                 }
                 .controlSize(.small)
+                if let never = i.never {
+                    Button(never) { model.never(i) }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
             } else if let t = model.text {
                 Text(t).font(.callout).italic().fixedSize(horizontal: false, vertical: true)
             }
@@ -174,6 +201,20 @@ final class BubbleController {
         panel.contentView = host
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: anchor, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.place() }
+        }
+    }
+
+    /// Recado com ela longe: o balão aparece onde ela costuma ficar e some sozinho.
+    func note(_ text: String) {
+        model.initiative = nil
+        model.text = text
+        guard !moving else { return }
+        show()
+        let shown = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
+            guard let self, self.model.text == shown, self.model.initiative == nil else { return }
+            self.model.text = nil
+            self.panel.orderOut(nil)
         }
     }
 
@@ -232,6 +273,7 @@ struct MindView: View {
                     section("Neurônios") { neurons(s) }
                     section("O que ela percebe agora") { inputs(s) }
                     section("Pensamentos") { thoughts(s) }
+                    section("O que você está fazendo") { context(s) }
                     section("Projetos em que você atua") { projects }
                     section("O que ela lembra de você") { memory(s) }
                     section("Roupinhas") { outfits(s) }
@@ -369,6 +411,33 @@ struct MindView: View {
             }
             .controlSize(.small)
             Text("Para ela lembrar de algo, diga no chat: “lembre que …”.").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func context(_ s: MindSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let c = s.context {
+                let since = Date(timeIntervalSince1970: TimeInterval(c.since))
+                HStack {
+                    Text(c.activity.isEmpty ? "—" : c.activity.capitalized).font(.callout.weight(.semibold))
+                    Text("desde \(since.formatted(date: .omitted, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+                }
+                if let p = c.project {
+                    Label([p, c.branch].compactMap { $0 }.joined(separator: " · "), systemImage: "hammer").font(.callout)
+                }
+                if !c.languages.isEmpty {
+                    Text(c.languages.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
+                }
+                if c.dirty > 0 {
+                    Text("\(c.dirty) arquivo(s) sem commit").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(c.subjects.prefix(3), id: \.self) { Text("· \($0)").font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                if let call = c.call { Label("Em chamada no \(call)", systemImage: "phone").font(.callout) }
+                if let a = c.agenda { Label(a, systemImage: "calendar").font(.callout) }
+                ForEach(c.pending, id: \.self) { Label($0, systemImage: "exclamationmark.triangle").font(.callout) }
+            }
+            if let t = s.today { Text("Hoje: \(t)").font(.callout) }
+            Text("Vem do git e do Claude Code dos seus projetos, nunca da tela.").font(.caption).foregroundStyle(.secondary)
         }
     }
 

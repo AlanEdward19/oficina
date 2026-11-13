@@ -80,6 +80,8 @@ pub enum Event {
     Delta { id: String, text: String },
     Usage { usage: crate::usage::Usage },
     Mind { mind: crate::mind::Brief },
+    Presence { presence: crate::presence::PresenceView },
+    Voice { voice: crate::body::VoiceJob },
 }
 
 pub struct Store {

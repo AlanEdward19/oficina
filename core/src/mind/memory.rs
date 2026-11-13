@@ -1,6 +1,7 @@
 //! O que a Faísca lembra: apps e horários, interesses, fatos ditos pelo
 //! usuário, roupinhas e o que já aprendeu. Fica só neste Mac.
 
+use super::context::Diary;
 use super::decor::Decor;
 use super::outfit::Outfit;
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,10 @@ pub struct Memory {
     pub bandit: HashMap<String, Bandit>,
     pub readout: Vec<f32>,
     pub energy: Option<f32>,
+    /// O dia em blocos: projetos e reuniões.
+    pub diary: Diary,
+    /// Apps de chamada em que ela nunca pergunta se deve ouvir.
+    pub call_never: Vec<String>,
 }
 
 const AI_HINTS: &[&str] = &["claude", "chatgpt", "openai", "cursor", "windsurf", "ollama", "lmstudio", "copilot", "codex"];
@@ -202,6 +207,8 @@ impl Memory {
         self.facts.clear();
         self.researched.clear();
         self.bandit.clear();
+        self.diary = Diary::default();
+        self.call_never.clear();
     }
 }
 

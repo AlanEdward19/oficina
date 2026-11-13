@@ -70,13 +70,7 @@ pub fn now() -> u64 {
 
 /// Início do dia no fuso local, em segundos Unix.
 fn local_day_start(ts: u64) -> u64 {
-    // SAFETY: `tm` é inicializada por localtime_r antes de ser lida.
-    let offset = unsafe {
-        let t = ts as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        tm.tm_gmtoff
-    };
+    let offset = crate::platform::local_time(ts).offset;
     let local = ts as i64 + offset;
     (local - local.rem_euclid(DAY as i64) - offset) as u64
 }
