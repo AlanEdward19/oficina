@@ -22,6 +22,8 @@
   .add { color: var(--faint); font-size: 24px; font-weight: 300; }
   .add:hover { color: var(--tint); }
   #home svg { width: 40px; height: 44px; }
+  #bar.appear { animation: rise .22s cubic-bezier(.2,.9,.3,1); }
+  @keyframes rise { from { transform: translateY(40px); opacity: 0; } }
   #picker { display: none; width: 420px; max-height: 300px; margin-bottom: 8px; background: var(--glass); backdrop-filter: blur(24px); border: 1px solid var(--line);
     border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.25); padding: 10px; flex-direction: column; }
   #picker.on { display: flex; }
@@ -91,6 +93,12 @@ window.Dock = {
     for (const el of document.querySelectorAll(".app[data-path]")) {
       if (el.dataset.path === path) el.querySelector(".letter, img").outerHTML = `<img src="${url}">`;
     }
+  },
+  appear() {
+    const bar = document.getElementById("bar");
+    bar.classList.remove("appear");
+    void bar.offsetWidth;
+    bar.classList.add("appear");
   },
   tint(c) { document.documentElement.style.setProperty("--tint", c); },
   open() { ipc("picker"); document.getElementById("picker").classList.add("on"); this.measure(); },

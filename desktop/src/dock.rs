@@ -27,11 +27,13 @@ pub struct Dock {
     pub envs: Vec<Env>,
     pub active: usize,
     pub visible: bool,
+    /// Some quando o mouse sai e volta ao encostar na borda de baixo, como no Mac.
+    pub autohide: bool,
 }
 
 impl Default for Dock {
     fn default() -> Self {
-        Self { envs: Vec::new(), active: 0, visible: true }
+        Self { envs: Vec::new(), active: 0, visible: true, autohide: false }
     }
 }
 
@@ -55,7 +57,7 @@ impl Dock {
         work.dedup_by(|a, b| a.path == b.path);
         let mut home = pick(&["spotify", "whatsapp", "discord", "chrome", "edge", "firefox", "fotos", "photos"]);
         home.dedup_by(|a, b| a.path == b.path);
-        Dock { envs: vec![Env { name: "Trabalho".into(), apps: work }, Env { name: "Pessoal".into(), apps: home }], active: 0, visible: true }
+        Dock { envs: vec![Env { name: "Trabalho".into(), apps: work }, Env { name: "Pessoal".into(), apps: home }], active: 0, visible: true, autohide: false }
     }
 
     pub fn save(&self, dir: &Path) {
@@ -310,7 +312,7 @@ mod tests {
 
     #[test]
     fn ambientes() {
-        let mut d = Dock { envs: vec![Env { name: "Trabalho".into(), apps: vec![] }, Env { name: "Pessoal".into(), apps: vec![] }], active: 0, visible: true };
+        let mut d = Dock { envs: vec![Env { name: "Trabalho".into(), apps: vec![] }, Env { name: "Pessoal".into(), apps: vec![] }], active: 0, visible: true, autohide: false };
         let app = App { name: "Terminal".into(), path: "C:/t.lnk".into() };
         d.add(app.clone());
         d.add(app.clone());
