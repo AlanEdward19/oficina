@@ -28,6 +28,10 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Window, WindowBuilder},
 };
+use global_hotkey::{
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
+    hotkey::{Code, HotKey, Modifiers},
+};
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -197,6 +201,8 @@ enum UserEvent {
     DockIcon(String, String),
     /// Lista de apps instalados, em JSON, para o "+" da Dock.
     DockApps(String),
+    /// Um atalho global foi apertado.
+    Hotkey(u32),
     Menu(tray_icon::menu::MenuId),
 }
 
@@ -263,6 +269,23 @@ fn place_dock(win: &Window, width: f64, height: f64) {
     if let Some((x, y, w, h)) = work_area(win) {
         win.set_outer_position(LogicalPosition::new((x + (w - width) / 2.0).round(), (y + h - height).round()));
     }
+}
+
+/// Onde está o mouse em relação à Dock: (na borda de baixo, na faixa da Dock;
+/// sobre a Dock). Tudo em pixels físicos, do monitor principal.
+fn dock_pointer(win: &Window) -> Option<(bool, bool)> {
+    let c = win.cursor_position().ok()?;
+    let pos = win.outer_position().ok()?;
+    let size = win.outer_size();
+    let m = win.primary_monitor().or_else(|| win.current_monitor())?;
+    let scale = m.scale_factor();
+    let bottom = (m.position().y + m.size().height as i32) as f64;
+    let margin = 24.0 * scale;
+    let (x0, x1) = (pos.x as f64 - margin, pos.x as f64 + size.width as f64 + margin);
+    let over = c.x >= x0 && c.x <= x1 && c.y >= pos.y as f64 - margin && c.y <= pos.y as f64 + size.height as f64 + margin;
+    // Encostar embaixo, mais ou menos sob a Dock, faz ela aparecer.
+    let edge = c.y >= bottom - 3.0 && c.x >= x0 - 120.0 * scale && c.x <= x1 + 120.0 * scale;
+    Some((edge, over))
 }
 
 /// O estado que a página da Dock desenha.
@@ -357,6 +380,10 @@ fn main() {
     let mut dock_size = (600.0, 150.0);
     let mut dock_shown = false;
     let mut dock_area = work_area(&dock_win);
+    // Auto-ocultar: escondida agora? E a última vez que o mouse esteve sobre ela.
+    let mut dock_hidden = false;
+    let mut dock_seen = Instant::now();
+    let mut dock_peek_until: Option<Instant> = None;
     let p = proxy.clone();
     let dock_view: WebView = WebViewBuilder::new()
         .with_transparent(true)
@@ -369,12 +396,35 @@ fn main() {
 
     let status = MenuItem::new(mode.label(), false, None);
     let show_dock = CheckMenuItem::new("Mostrar Dock", true, dock_data.visible, None);
+    let autohide = CheckMenuItem::new("Ocultar a Dock automaticamente", true, dock_data.autohide, None);
+
+    // Atalhos globais, como no Mac: Ctrl+Alt+1–9 troca o ambiente da Dock e
+    // Ctrl+Alt+Espaço abre e fecha a conversa.
+    let hotkeys = GlobalHotKeyManager::new().ok();
+    let mut hotkey_env: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    let chat_key = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space);
+    if let Some(m) = &hotkeys {
+        let digits = [Code::Digit1, Code::Digit2, Code::Digit3, Code::Digit4, Code::Digit5, Code::Digit6, Code::Digit7, Code::Digit8, Code::Digit9];
+        for (i, code) in digits.into_iter().enumerate() {
+            let k = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), code);
+            if m.register(k).is_ok() {
+                hotkey_env.insert(k.id(), i);
+            }
+        }
+        let _ = m.register(chat_key);
+    }
+    let p = proxy.clone();
+    GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
+        if e.state == HotKeyState::Pressed {
+            let _ = p.send_event(UserEvent::Hotkey(e.id));
+        }
+    }));
     let talk = MenuItem::new("Conversar", true, None);
     let call = MenuItem::new("Chamar a Faísca para cá", matches!(mode, Mode::Body { .. }), None);
     let search = MenuItem::new("Procurar a Faísca na rede de novo", true, None);
     let quit = MenuItem::new("Sair", true, None);
     let menu = Menu::new();
-    let _ = menu.append_items(&[&status, &PredefinedMenuItem::separator(), &talk, &call, &show_dock, &search, &PredefinedMenuItem::separator(), &quit]);
+    let _ = menu.append_items(&[&status, &PredefinedMenuItem::separator(), &talk, &call, &show_dock, &autohide, &search, &PredefinedMenuItem::separator(), &quit]);
     let p = proxy.clone();
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         let _ = p.send_event(UserEvent::Menu(e.id));
@@ -389,14 +439,57 @@ fn main() {
     };
 
     event_loop.run(move |event, _, flow| {
-        // Acorda a cada 3 s para conferir a área útil (resolução ou barra de tarefas mudaram).
-        *flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(3));
+        // Com auto-ocultar, olha o mouse a cada 120 ms; sem ele, só confere a
+        // área útil a cada 3 s (resolução ou barra de tarefas mudaram).
+        let watching = dock_data.visible && dock_data.autohide && dock_shown;
+        *flow = ControlFlow::WaitUntil(Instant::now() + if watching { Duration::from_millis(120) } else { Duration::from_secs(3) });
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 let area = work_area(&dock_win);
                 if area != dock_area {
                     dock_area = area;
                     place_dock(&dock_win, dock_size.0, dock_size.1);
+                }
+                if watching {
+                    let now = Instant::now();
+                    let peeking = dock_peek_until.is_some_and(|t| now < t);
+                    let picker = dock_size.1 > 200.0;
+                    match dock_pointer(&dock_win) {
+                        Some((_, true)) => dock_seen = now,
+                        Some((at_edge, false)) if dock_hidden && at_edge => {
+                            dock_hidden = false;
+                            dock_seen = now;
+                            place_dock(&dock_win, dock_size.0, dock_size.1);
+                            dock_win.set_visible(true);
+                            let _ = dock_view.evaluate_script("Dock.appear()");
+                        }
+                        _ => {}
+                    }
+                    if !dock_hidden && !peeking && !picker && now.duration_since(dock_seen) > Duration::from_millis(800) {
+                        dock_hidden = true;
+                        dock_win.set_visible(false);
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::Hotkey(id)) => {
+                if id == chat_key.id() {
+                    if chat.is_visible() {
+                        chat.set_visible(false);
+                    } else {
+                        show_chat(&chat, &chat_view);
+                    }
+                } else if let Some(i) = hotkey_env.get(&id).copied() {
+                    let _ = proxy.send_event(UserEvent::Dock(format!("switch:{i}")));
+                    // Mostra a Dock por um instante, para ver em que ambiente ficou.
+                    if dock_data.visible {
+                        dock_peek_until = Some(Instant::now() + Duration::from_millis(1500));
+                        dock_seen = Instant::now();
+                        if dock_hidden {
+                            dock_hidden = false;
+                            dock_win.set_visible(true);
+                            let _ = dock_view.evaluate_script("Dock.appear()");
+                        }
+                    }
                 }
             }
             Event::NewEvents(StartCause::Init) => {
@@ -500,8 +593,15 @@ fn main() {
                 let _ = dock_view.evaluate_script(&format!("Dock.picker({list})"));
             }
             Event::UserEvent(UserEvent::Menu(id)) => {
-                if id == *show_dock.id() {
+                if id == *autohide.id() {
+                    dock_data.autohide = autohide.is_checked();
+                    dock_hidden = false;
+                    dock_seen = Instant::now();
+                    dock_win.set_visible(dock_data.visible);
+                    dock_data.save(&data_dir());
+                } else if id == *show_dock.id() {
                     dock_data.visible = show_dock.is_checked();
+                    dock_hidden = false;
                     dock_win.set_visible(dock_data.visible);
                     if dock_data.visible {
                         place_dock(&dock_win, dock_size.0, dock_size.1);
