@@ -35,6 +35,9 @@ pub struct Body {
     /// A conversa em que a Faísca fala com quem está ali.
     pub conversation: String,
     pub created: u64,
+    /// Identidade de fábrica do aparelho (endereço MAC), para se reapresentar.
+    #[serde(default)]
+    pub device: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -80,6 +83,8 @@ pub struct PresenceView {
     pub importance: Option<String>,
     pub bodies: Vec<BodyView>,
     pub network: bool,
+    /// Aceitar sozinha os dispositivos que se apresentam na rede.
+    pub auto_accept: bool,
     pub pairing: Option<String>,
 }
 
@@ -96,11 +101,19 @@ pub enum CallOutcome {
     Staying { message: String },
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct Saved {
     bodies: Vec<Body>,
     network: bool,
+    auto_accept: bool,
+}
+
+/// Sem pareamento: a porta dos dispositivos abre e eles entram sozinhos.
+impl Default for Saved {
+    fn default() -> Self {
+        Self { bodies: Vec::new(), network: true, auto_accept: true }
+    }
 }
 
 struct Live {
@@ -208,12 +221,75 @@ impl Presences {
             token: crate::config::random_hex(32).map_err(|e| e.to_string())?,
             conversation,
             created: now,
+            device: String::new(),
         };
         let mut s = self.saved.lock().unwrap();
         s.bodies.push(body.clone());
         self.save(&s);
         self.live.lock().unwrap().seen.insert(body.id.clone(), now);
         Ok(body)
+    }
+
+    pub fn set_auto_accept(&self, on: bool) {
+        let mut s = self.saved.lock().unwrap();
+        s.auto_accept = on;
+        self.save(&s);
+    }
+
+    /// O dispositivo se apresenta sozinho. Se já é conhecido (mesmo aparelho,
+    /// depois de regravar), ganha um token novo e mantém nome, cômodo e conversa.
+    /// `conversation` só é usada para um dispositivo novo. Devolve (corpo, é novo).
+    pub fn hello(&self, device: &str, name: &str, room: &str, kind: &str, conversation: impl FnOnce(&str) -> String, now: u64) -> Result<(Body, bool), String> {
+        let device = clean(device, 64);
+        if device.len() < 6 {
+            return Err("O dispositivo precisa mandar a própria identidade.".into());
+        }
+        let mut s = self.saved.lock().unwrap();
+        if !s.auto_accept {
+            return Err("Aceitar dispositivos sozinha está desligado. Ligue em Dispositivos.".into());
+        }
+        let token = crate::config::random_hex(32).map_err(|e| e.to_string())?;
+        if let Some(b) = s.bodies.iter_mut().find(|b| b.device == device) {
+            b.token = token;
+            let b = b.clone();
+            self.save(&s);
+            drop(s);
+            self.live.lock().unwrap().seen.insert(b.id.clone(), now);
+            return Ok((b, false));
+        }
+        let n = s.bodies.iter().filter(|b| b.kind == "caixa").count() + 1;
+        let room = { let r = clean(room, 40); if r.is_empty() { "sala".to_string() } else { r } };
+        let body = Body {
+            id: format!("b{:x}", crate::conv::next_id()),
+            name: { let x = clean(name, 40); if x.is_empty() { format!("Caixa {n}") } else { x } },
+            conversation: conversation(&room),
+            room,
+            kind: if kind.trim().is_empty() { "caixa".into() } else { clean(kind, 20) },
+            token,
+            created: now,
+            device,
+        };
+        s.bodies.push(body.clone());
+        self.save(&s);
+        drop(s);
+        self.live.lock().unwrap().seen.insert(body.id.clone(), now);
+        Ok((body, true))
+    }
+
+    /// Dar nome e cômodo a um dispositivo.
+    pub fn rename(&self, id: &str, name: &str, room: &str) -> Option<Body> {
+        let mut s = self.saved.lock().unwrap();
+        let b = s.bodies.iter_mut().find(|b| b.id == id)?;
+        let (name, room) = (clean(name, 40), clean(room, 40));
+        if !name.is_empty() {
+            b.name = name;
+        }
+        if !room.is_empty() {
+            b.room = room;
+        }
+        let b = b.clone();
+        self.save(&s);
+        Some(b)
     }
 
     pub fn forget(&self, id: &str) -> Option<Body> {
@@ -429,6 +505,7 @@ impl Presences {
                 online: Self::online(&l, &b.id, now),
             }).collect(),
             network: s.network,
+            auto_accept: s.auto_accept,
             pairing: l.pairing.as_ref().filter(|(_, until)| now <= *until).map(|(c, _)| c.clone()),
         }
     }
@@ -545,6 +622,25 @@ mod tests {
         p.heartbeat(&sala.id, 200);
         p.move_to(&sala.id, "", 200).unwrap();
         assert!(p.tick(false, 200 + OFFLINE + 1).is_some(), "corpo sumiu: volta");
+    }
+
+    #[test]
+    fn dispositivo_se_apresenta_sozinho() {
+        let p = presences();
+        let (b, new) = p.hello("AA:BB:CC:DD:EE:FF", "", "", "", |r| format!("c-{r}"), 5).unwrap();
+        assert!(new);
+        assert_eq!((b.name.as_str(), b.room.as_str(), b.conversation.as_str()), ("Caixa 1", "sala", "c-sala"));
+        assert!(p.auth(&b.token).is_some());
+        // O mesmo aparelho de novo (regravado): mesmo corpo, token novo, o antigo deixa de valer.
+        let (again, new) = p.hello("AA:BB:CC:DD:EE:FF", "", "Quarto", "", |_| unreachable!(), 6).unwrap();
+        assert!(!new);
+        assert_eq!(again.id, b.id);
+        assert!(p.auth(&b.token).is_none());
+        assert!(p.auth(&again.token).is_some());
+        assert_eq!(p.rename(&b.id, "", "Cozinha").unwrap().room, "Cozinha");
+        assert!(p.hello("x", "", "", "", |_| String::new(), 7).is_err(), "sem identidade não entra");
+        p.set_auto_accept(false);
+        assert!(p.hello("11:22:33:44:55:66", "", "", "", |_| String::new(), 8).is_err());
     }
 
     #[test]

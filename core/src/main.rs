@@ -40,7 +40,7 @@ struct App {
     engine: Arc<Engine>,
     token: Arc<str>,
     /// A porta dos dispositivos, quando ligada.
-    bodies: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    bodies: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Deserialize)]
@@ -537,7 +537,7 @@ async fn presence_call(State(app): State<App>, Json(c): Json<CallBody>) -> impl 
 /// Liga ou desliga a porta dos dispositivos na rede.
 fn set_body_network(app: &App, on: bool) -> Result<(), String> {
     let mut slot = app.bodies.lock().unwrap();
-    if let Some(h) = slot.take() {
+    for h in slot.drain(..) {
         h.abort();
     }
     app.engine.presence.set_network(on);
@@ -547,18 +547,62 @@ fn set_body_network(app: &App, on: bool) -> Result<(), String> {
         std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let listener = tokio::net::TcpListener::from_std(std_listener).map_err(|e| e.to_string())?;
         let router = body_router(app.engine.clone());
-        *slot = Some(tokio::spawn(async move {
+        slot.push(tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         }));
+        // Descoberta: a caixa grita "oficina?" na rede e o core responde onde está.
+        if let Ok(udp) = std::net::UdpSocket::bind(&addr).and_then(|u| u.set_nonblocking(true).map(|_| u)) {
+            if let Ok(udp) = tokio::net::UdpSocket::from_std(udp) {
+                let port = listener_port(&addr);
+                let name = app.engine.name.clone();
+                slot.push(tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    loop {
+                        let Ok((n, from)) = udp.recv_from(&mut buf).await else { continue };
+                        if &buf[..n] == b"oficina?" {
+                            let _ = udp.send_to(format!("oficina:{port}:{name}").as_bytes(), from).await;
+                        }
+                    }
+                }));
+            }
+        }
         eprintln!("oficinad: dispositivos em {addr}");
     }
     app.engine.publish_presence();
     Ok(())
 }
 
+fn listener_port(addr: &str) -> u16 {
+    addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(7879)
+}
+
 #[derive(Deserialize)]
 struct NetworkBody {
     on: bool,
+}
+
+async fn bodies_auto(State(app): State<App>, Json(n): Json<NetworkBody>) -> impl IntoResponse {
+    app.engine.presence.set_auto_accept(n.on);
+    app.engine.publish_presence();
+    Json(app.engine.presence_view())
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    room: String,
+}
+
+async fn bodies_rename(State(app): State<App>, Path(id): Path<String>, Json(r): Json<RenameBody>) -> Response {
+    match app.engine.presence.rename(&id, &r.name, &r.room) {
+        Some(_) => {
+            app.engine.publish_presence();
+            Json(app.engine.presence_view()).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn bodies_network(State(app): State<App>, Json(n): Json<NetworkBody>) -> Response {
@@ -570,7 +614,7 @@ async fn bodies_network(State(app): State<App>, Json(n): Json<NetworkBody>) -> R
 
 /// Um código para parear uma caixa de som. Liga a porta dos dispositivos.
 async fn bodies_pairing(State(app): State<App>) -> Response {
-    if !app.engine.presence.network() || app.bodies.lock().unwrap().is_none() {
+    if !app.engine.presence.network() || app.bodies.lock().unwrap().is_empty() {
         if let Err(e) = set_body_network(&app, true) {
             return (StatusCode::BAD_REQUEST, e).into_response();
         }
@@ -659,6 +703,35 @@ async fn body_pair(State(app): State<BodyApp>, Json(p): Json<PairBody>) -> Respo
     }
 }
 
+#[derive(Deserialize)]
+struct HelloBody {
+    device: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    room: String,
+    #[serde(default)]
+    kind: String,
+}
+
+/// Sem pareamento: o dispositivo diz quem é e entra (se o aceite automático estiver ligado).
+async fn body_hello(State(app): State<BodyApp>, Json(h): Json<HelloBody>) -> Response {
+    let engine = app.engine.clone();
+    let result = app.engine.presence.hello(&h.device, &h.name, &h.room, &h.kind, |room| {
+        engine.convs.create(Some(&format!("Voz · {room}")), None).id
+    }, usage::now());
+    match result {
+        Ok((b, new)) => {
+            if new {
+                app.engine.mind.note(format!("Nova caixa na rede: {}, na {}.", b.name, b.room));
+            }
+            app.engine.publish_presence();
+            Json(serde_json::json!({"id": b.id, "token": b.token, "name": b.name, "room": b.room})).into_response()
+        }
+        Err(e) => (StatusCode::FORBIDDEN, e).into_response(),
+    }
+}
+
 async fn body_heartbeat(State(app): State<BodyApp>) -> impl IntoResponse {
     let v = app.engine.presence_view();
     Json(serde_json::json!({"holder": v.holder}))
@@ -731,6 +804,7 @@ fn body_router(engine: Arc<Engine>) -> Router {
         .route_layer(middleware::from_fn_with_state(app.clone(), body_auth));
     Router::new()
         .route("/v1/body/pair", post(body_pair))
+        .route("/v1/body/hello", post(body_hello))
         .merge(private)
         .layer(axum::extract::DefaultBodyLimit::max(body::MAX_AUDIO + 1024))
         .with_state(app)
@@ -856,7 +930,8 @@ async fn main() {
         .route("/v1/presence/call", post(presence_call))
         .route("/v1/bodies/pairing", post(bodies_pairing))
         .route("/v1/bodies/network", post(bodies_network))
-        .route("/v1/bodies/{id}", delete(bodies_forget))
+        .route("/v1/bodies/auto", post(bodies_auto))
+        .route("/v1/bodies/{id}", delete(bodies_forget).post(bodies_rename))
         .route("/v1/voice/{id}", get(voice_get).post(voice_put))
         .route("/v1/voice/{id}/text", post(voice_text))
         .route("/v1/usage", get(usage))

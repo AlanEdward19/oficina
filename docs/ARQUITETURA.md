@@ -70,7 +70,7 @@ Autenticação por `Authorization: Bearer <token>`, exceto `health`. Escuta só 
 | `GET/POST /v1/hardware`, `GET/DELETE /v1/hardware/{id}` | Projetos da Oficina de hardware |
 | `GET /v1/hardware/{id}/diagram`, `POST /v1/hardware/{id}/run/{sim\|build\|erc\|firmware}`, `POST /v1/hardware/setup` | Simular, modelar e checar sem tokens; instalar o CAD |
 | `GET /v1/presence`, `POST /v1/presence/move`, `POST /v1/presence/call` | Onde ela está, levar, chamar (`force`) |
-| `POST /v1/bodies/pairing`, `POST /v1/bodies/network`, `DELETE /v1/bodies/{id}` | Parear e esquecer dispositivos |
+| `POST /v1/bodies/auto`, `POST /v1/bodies/network`, `POST/DELETE /v1/bodies/{id}` | Aceite automático, porta, renomear e esquecer dispositivos |
 | `GET/POST /v1/voice/{id}`, `POST /v1/voice/{id}/text` | O Mac sintetiza e transcreve para os dispositivos |
 | `GET /v1/events` | SSE com `{kind: task\|delta\|usage\|resync}` |
 
@@ -152,9 +152,13 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
 
 - **Uma Faísca, um lugar.** A mente fica no core do Mac ("casa"). Dispositivos são corpos (`presence.rs`); só quem tem a
   posse de presença fala e ouve. Ir para outro lugar manda "saiu" ao anterior e "chegou" ao novo.
-- **Porta só para dispositivos** (`body_listen`, `0.0.0.0:7879`), desligada até você parear um. Lá só existem as
-  rotas `/v1/body/*`, com um token por dispositivo, recebido em troca de um código de 6 dígitos que vale 10 minutos e
-  uma vez. A API principal continua só no localhost.
+- **Sem pareamento.** O core abre uma porta só para dispositivos (`body_listen`, `0.0.0.0:7879`) e responde ao
+  broadcast UDP `oficina?` com `oficina:<porta>:<nome>`. A caixa se apresenta (`/v1/body/hello`) com o endereço MAC e,
+  com "Aceitar dispositivos sozinha" ligado (o padrão), entra na hora e recebe um token só dela; a Faísca avisa. O mesmo
+  aparelho, regravado, volta como o mesmo dispositivo com token novo. Lá só existem as rotas `/v1/body/*`; a API
+  principal continua só no localhost. O risco: qualquer aparelho da rede pode se apresentar. Por isso as duas chaves
+  em Dispositivos, o "Esquecer", e o que gasta ou mexe no Mac continua pedindo aprovação. O código de 6 dígitos
+  (`/v1/bodies/pairing`) fica para quem desligar o aceite automático.
 - **Voz:** o core pede ao app do Mac a fala sintetizada (`AVSpeechSynthesizer`, WAV 16 kHz) e a transcrição do que a
   caixa gravou (`SFSpeechRecognizer` no Mac). Os áudios ficam só na memória, no máximo 30 ou 24 MB. Sem o app, a caixa
   recebe só o texto.

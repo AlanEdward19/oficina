@@ -23,7 +23,13 @@ struct PresenceData: Decodable, Equatable {
     let importance: String?
     let bodies: [BodyData]
     let network: Bool
+    let autoAccept: Bool
     let pairing: String?
+
+    enum CodingKeys: String, CodingKey {
+        case holder, name, room, since, reason, importance, bodies, network, pairing
+        case autoAccept = "auto_accept"
+    }
 
     var away: Bool { holder != "casa" }
 }
@@ -33,11 +39,6 @@ struct CallResult: Decodable {
     let farewell: String?
     let notice: String?
     let message: String?
-}
-
-struct PairingData: Decodable {
-    let code: String
-    let port: String
 }
 
 struct VoiceJobData: Decodable {
@@ -170,29 +171,30 @@ private final class PCMCollector: @unchecked Sendable {
 
 // MARK: Tela
 
-/// Os lugares onde a Faísca pode estar: o Mac e as caixas de som pareadas.
+/// Os lugares onde a Faísca pode estar: o Mac e as caixas de som da casa.
 struct DevicesView: View {
     @ObservedObject var core: Core
     var tint: Color
-    @State private var pairing: PairingData?
     @State private var error: String?
-    @State private var busy = false
+    @State private var editing: String?
+    @State private var newName = ""
+    @State private var newRoom = ""
 
     private var p: PresenceData? { core.presence }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
+            VStack(alignment: .leading, spacing: 30) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Dispositivos").font(Bench.display(26))
-                    Text("Existe uma Faísca só. Ela pode ir até uma caixa de som em outro cômodo, falar e ouvir por lá, e volta quando a conversa acaba ou quando você chama.")
+                    Text("Existe uma Faísca só. Ela vai até a caixa de som de outro cômodo, fala e ouve por lá, e volta quando a conversa acaba ou quando você chama.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 whereIs
                 Rectangle().fill(Bench.line).frame(height: 1)
-                list
+                places
                 Rectangle().fill(Bench.line).frame(height: 1)
-                pair
+                network
                 if let error { Text(error).font(.callout).foregroundStyle(.red) }
             }
             .padding(.horizontal, 44)
@@ -205,15 +207,14 @@ struct DevicesView: View {
         .ignoresSafeArea()
     }
 
+    /// Onde ela está agora, com o avatar e o jeito de chamar de volta.
     private var whereIs: some View {
         HStack(spacing: 16) {
-            Circle().fill(tint).frame(width: 10, height: 10)
+            FaiscaAvatar(size: 44, mood: .idle)
+                .opacity(p?.away == true ? 0.45 : 1)
             VStack(alignment: .leading, spacing: 3) {
-                Text(p?.away == true ? "Na \(p?.room ?? "")" : "No Mac").font(.system(size: 17, weight: .semibold))
-                if let p, p.away {
-                    Text([p.reason, p.importance.map { "conversa \($0)" }].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                Text(p?.away == true ? "Na \(p?.room ?? "")" : "No Mac, com você").font(.system(size: 17, weight: .semibold))
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             if p?.away == true {
@@ -223,70 +224,93 @@ struct DevicesView: View {
         }
     }
 
-    private var list: some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private var subtitle: String {
+        guard let p, p.away else { return "Ela vai aonde você pedir: “vai chamar a Ana na sala”." }
+        let talk = ["alta": "ajudando com um pedido", "media": "conversando", "baixa": "esperando alguém falar"][p.importance ?? ""]
+        return [talk, p.reason.isEmpty ? nil : "“\(p.reason)”"].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private var places: some View {
+        VStack(alignment: .leading, spacing: 6) {
             Text("Caixas de som").font(.system(size: 13, weight: .semibold))
             if (p?.bodies ?? []).isEmpty {
-                Text("Nenhuma ainda.").font(.callout).foregroundStyle(.secondary)
+                Text("Nenhuma ainda. Ligue uma caixa: ela aparece aqui sozinha.").font(.callout).foregroundStyle(.secondary)
             }
             ForEach(p?.bodies ?? []) { b in
-                HoverRow(keepTrailing: p?.holder == b.id) {
-                    Circle().fill(b.online ? tint : Bench.line).frame(width: 7, height: 7)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(b.name).font(.system(size: 13, weight: p?.holder == b.id ? .semibold : .regular))
-                        Text("\(b.room) · \(b.online ? "ligada" : "desligada")").font(.caption).foregroundStyle(.secondary)
+                if editing == b.id {
+                    HStack(spacing: 16) {
+                        HairField(prompt: "Nome", text: $newName).frame(width: 180)
+                        HairField(prompt: "Cômodo", text: $newRoom).frame(width: 140)
+                        Spacer()
+                        Button("Salvar") { save(b.id) }.buttonStyle(SolidStyle())
+                        Button("Cancelar") { editing = nil }.buttonStyle(QuietStyle(tint: tint))
                     }
-                } trailing: {
-                    HStack(spacing: 14) {
-                        if p?.holder == b.id {
-                            Text("Ela está aqui").font(.caption).foregroundStyle(tint)
-                        } else if b.online {
-                            Button("Levar a Faísca") { go(b.id) }.buttonStyle(QuietStyle(tint: tint))
-                        }
-                        Button("Esquecer") { Task { await core.forgetDevice(b.id) } }.buttonStyle(QuietStyle(tint: tint))
-                    }
+                    .padding(.vertical, 6)
+                } else {
+                    row(b)
                 }
             }
         }
     }
 
-    private var pair: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Aceitar dispositivos na rede").font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Toggle("", isOn: Binding(get: { p?.network ?? false }, set: { on in Task { error = await core.setDeviceNetwork(on) } }))
-                    .toggleStyle(BenchSwitch(tint: tint))
+    private func row(_ b: BodyData) -> some View {
+        let here = p?.holder == b.id
+        return HoverRow(keepTrailing: here) {
+            Image(systemName: "hifispeaker.fill")
+                .font(.system(size: 15))
+                .foregroundStyle(here ? tint : b.online ? Color.primary : Bench.faint)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(b.room).font(.system(size: 14, weight: here ? .semibold : .regular))
+                Text("\(b.name) · \(b.online ? "ligada" : "desligada")").font(.caption).foregroundStyle(.secondary)
             }
-            Text("Abre uma porta só para dispositivos, com token próprio. O resto da Oficina continua só neste Mac.")
-                .font(.caption).foregroundStyle(.secondary)
-            if let code = pairing?.code ?? p?.pairing {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(code).font(.system(size: 34, weight: .bold, design: .monospaced)).foregroundStyle(tint).textSelection(.enabled)
-                    Text("Vale 10 minutos e uma vez. Na caixa, preencha o código, o cômodo e o endereço deste Mac (porta \(port)). Para testar sem caixa:")
-                        .font(.callout).fixedSize(horizontal: false, vertical: true)
-                    Text("python3 devices/caixa/simulador.py --codigo \(code) --comodo Sala")
-                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+        } trailing: {
+            HStack(spacing: 14) {
+                if here {
+                    Text("Ela está aqui").font(.caption.weight(.semibold)).foregroundStyle(tint)
+                } else if b.online {
+                    Button("Levar a Faísca") { go(b.id) }.buttonStyle(QuietStyle(tint: tint))
                 }
+                Button("Renomear") {
+                    newName = b.name
+                    newRoom = b.room
+                    editing = b.id
+                }.buttonStyle(QuietStyle(tint: tint))
+                Button("Esquecer") { Task { await core.forgetDevice(b.id) } }.buttonStyle(QuietStyle(tint: tint))
             }
-            Button(busy ? "Gerando…" : "Parear caixa de som") { startPairing() }
-                .buttonStyle(SolidStyle())
-                .disabled(busy)
         }
     }
 
-    private var port: String { (pairing?.port ?? "0.0.0.0:7879").split(separator: ":").last.map(String.init) ?? "7879" }
+    private var network: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            setting("Aceitar dispositivos sozinha", "Uma caixa nova na sua rede entra sem código, e ela te avisa. Desligue se a rede for compartilhada.",
+                    on: p?.autoAccept ?? true) { on in Task { error = await core.setAutoAccept(on) } }
+            setting("Procurar dispositivos na rede", "Abre uma porta só para dispositivos, com token próprio para cada um. O resto da Oficina continua só neste Mac.",
+                    on: p?.network ?? true) { on in Task { error = await core.setDeviceNetwork(on) } }
+            Text("Caixa nova: no primeiro uso ela abre a rede “Faísca-Caixa”. Entre pelo celular, escolha o seu Wi-Fi e o cômodo, e pronto.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func setting(_ title: String, _ detail: String, on: Bool, _ set: @escaping (Bool) -> Void) -> some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13, weight: .semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Toggle("", isOn: Binding(get: { on }, set: set)).toggleStyle(BenchSwitch(tint: tint))
+        }
+    }
 
     private func go(_ id: String) {
         Task { error = await core.movePresence(to: id, text: "Oi! Cheguei.") }
     }
 
-    private func startPairing() {
-        busy = true
+    private func save(_ id: String) {
         Task {
-            pairing = await core.startPairing()
-            if pairing == nil { error = "Não consegui abrir a porta dos dispositivos." }
-            busy = false
+            error = await core.renameDevice(id, name: newName, room: newRoom)
+            if error == nil { editing = nil }
         }
     }
 }

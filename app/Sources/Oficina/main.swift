@@ -654,84 +654,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) { popover = nil }
 
+    /// O menu da Faísca (botão direito nela ou no ícone da barra): ela no topo,
+    /// depois o que fazer agora, onde ela está, a Oficina e os ajustes.
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
-        let chat = NSMenuItem(title: "Conversar", action: #selector(openChat), keyEquivalent: " ")
-        chat.keyEquivalentModifierMask = [.control, .option]
-        chat.target = self
-        menu.addItem(chat)
-        let ask = NSMenuItem(title: "Pedir melhoria…", action: #selector(askImprovement), keyEquivalent: "")
-        ask.target = self
-        menu.addItem(ask)
-        let bed = NSMenuItem(title: "Colocar para dormir", action: #selector(putToBed), keyEquivalent: "")
-        bed.target = self
-        menu.addItem(bed)
-        if listener?.active == true {
-            let stop = NSMenuItem(title: "Parar de ouvir a chamada", action: #selector(stopListening), keyEquivalent: "")
-            stop.target = self
-            menu.addItem(stop)
+        let name = core.settings.name
+        let tint = colorFromHex(core.settings.body_color)
+        let p = core.presence
+        let listening = listener?.active == true
+        let place = p?.away == true ? "Na \(p?.room ?? "")" : "No Mac, com você"
+        let status: String? = listening ? "Ouvindo a chamada" : core.mind?.call.map { "Em chamada no \($0)" }
+        menu.addItem(menuHeader(MenuHeader(name: name, mood: core.mind?.mood ?? "", sleeping: core.mind?.sleeping ?? false,
+                                           place: place, status: status, listening: listening, tint: tint)))
+        menu.addItem(.separator())
+
+        menu.addItem(menuItem("Conversar", "bubble.left.and.bubble.right", self, #selector(openChat), key: " ", modifiers: [.control, .option]))
+        menu.addItem(menuItem("Me sugere algo", "sparkles", self, #selector(suggestNow)))
+        if listening {
+            menu.addItem(menuItem("Parar de ouvir a chamada", "stop.circle", self, #selector(stopListening)))
         }
-        let factory = NSMenuItem(title: "Fábrica de agentes…", action: #selector(openFactory), keyEquivalent: "")
-        factory.target = self
-        menu.addItem(factory)
-        let hardware = NSMenuItem(title: "Oficina de hardware…", action: #selector(openHardware), keyEquivalent: "")
-        hardware.target = self
-        menu.addItem(hardware)
-        let meetings = NSMenuItem(title: "Reuniões…", action: #selector(openMeetings), keyEquivalent: "")
-        meetings.target = self
-        menu.addItem(meetings)
-        let devices = NSMenuItem(title: "Dispositivos…", action: #selector(openDevices), keyEquivalent: "")
-        devices.target = self
-        menu.addItem(devices)
-        if core.presence?.away == true {
-            let back = NSMenuItem(title: "Chamar a Faísca de volta agora", action: #selector(callBackNow), keyEquivalent: "")
-            back.target = self
-            menu.addItem(back)
+        if p?.away == true {
+            menu.addItem(menuItem("Chamar de volta agora", "arrow.uturn.backward.circle", self, #selector(callBackNow)))
         }
-        let calendar = NSMenuItem(title: "Usar a agenda", action: #selector(toggleAgenda), keyEquivalent: "")
-        calendar.target = self
-        calendar.state = agenda.enabled ? .on : .off
-        menu.addItem(calendar)
-        let cleaner = NSMenuItem(title: "Limpeza do Disco…", action: #selector(openCleaner), keyEquivalent: "")
-        cleaner.target = self
-        menu.addItem(cleaner)
-        let utilities = NSMenuItem(title: "Painel da barra de menus", action: #selector(openTools), keyEquivalent: "")
-        utilities.target = self
-        menu.addItem(utilities)
-        let personalize = NSMenuItem(title: "Personalizar…", action: #selector(openPersonalize), keyEquivalent: "")
-        personalize.target = self
-        menu.addItem(personalize)
-        let mind = NSMenuItem(title: "Mente de \(core.settings.name)…", action: #selector(openMind), keyEquivalent: "")
-        mind.target = self
-        menu.addItem(mind)
-        let suggest = NSMenuItem(title: "Me sugere algo", action: #selector(suggestNow), keyEquivalent: "")
-        suggest.target = self
-        menu.addItem(suggest)
-        let dockItem = NSMenuItem(title: "Dock", action: nil, keyEquivalent: "")
+
+        menu.addItem(.separator())
+        menu.addItem(menuSection("Onde ela está"))
+        let go = menuItem("Ir para", "location", self, #selector(noop))
+        let goMenu = NSMenu()
+        let mac = menuItem("Mac", "laptopcomputer", self, #selector(goTo(_:)), on: p?.away != true)
+        mac.representedObject = "casa"
+        goMenu.addItem(mac)
+        for b in p?.bodies ?? [] {
+            let item = menuItem(b.room, "hifispeaker", self, #selector(goTo(_:)), on: p?.holder == b.id)
+            item.representedObject = b.id
+            item.isEnabled = b.online
+            if !b.online { item.title = "\(b.room) (desligada)" }
+            goMenu.addItem(item)
+        }
+        go.submenu = goMenu
+        go.action = nil
+        menu.addItem(go)
+        menu.addItem(menuItem("Dispositivos…", "hifispeaker.2", self, #selector(openDevices)))
+        menu.addItem(menuItem("Reuniões…", "text.bubble", self, #selector(openMeetings)))
+
+        menu.addItem(.separator())
+        menu.addItem(menuSection("Oficina"))
+        menu.addItem(menuItem("Fábrica de agentes…", "person.3", self, #selector(openFactory)))
+        menu.addItem(menuItem("Oficina de hardware…", "cpu", self, #selector(openHardware)))
+        menu.addItem(menuItem("Limpeza do Disco…", "externaldrive", self, #selector(openCleaner)))
+        menu.addItem(menuItem("Painel da barra de menus", "menubar.rectangle", self, #selector(openTools)))
+
+        menu.addItem(.separator())
+        menu.addItem(menuSection(name))
+        menu.addItem(menuItem("Mente de \(name)…", "brain", self, #selector(openMind)))
+        menu.addItem(menuItem("Personalizar…", "paintpalette", self, #selector(openPersonalize)))
+        menu.addItem(menuItem("Colocar para dormir", "moon.zzz", self, #selector(putToBed)))
+        menu.addItem(menuItem("Usar a agenda", "calendar", self, #selector(toggleAgenda), on: agenda.enabled))
+        let dockItem = menuItem("Dock", "dock.rectangle", self, #selector(noop))
+        dockItem.action = nil
         let dockMenu = NSMenu()
-        let showDock = NSMenuItem(title: "Mostrar Dock", action: #selector(toggleDock), keyEquivalent: "")
-        showDock.target = self
-        showDock.state = dock.enabled ? .on : .off
-        dockMenu.addItem(showDock)
-        let replace = NSMenuItem(title: "Substituir a Dock do macOS", action: #selector(toggleReplace), keyEquivalent: "")
-        replace.target = self
-        replace.state = dock.replacingSystemDock ? .on : .off
-        dockMenu.addItem(replace)
+        dockMenu.addItem(menuItem("Mostrar Dock", "eye", self, #selector(toggleDock), on: dock.enabled))
+        dockMenu.addItem(menuItem("Substituir a Dock do macOS", "rectangle.2.swap", self, #selector(toggleReplace), on: dock.replacingSystemDock))
         dockMenu.addItem(.separator())
+        dockMenu.addItem(menuSection("Ambientes"))
         for (i, env) in dock.store.envs.enumerated() {
-            let item = NSMenuItem(title: env.title, action: #selector(pickEnvironment(_:)), keyEquivalent: i < 9 ? "\(i + 1)" : "")
-            item.keyEquivalentModifierMask = [.control, .option]
-            item.target = self
-            item.tag = i
-            item.state = i == dock.store.active ? .on : .off
+            let item = menuItem(env.title, "square.grid.2x2", self, #selector(pickEnvironment(_:)), key: i < 9 ? "\(i + 1)" : "",
+                                modifiers: [.control, .option], on: i == dock.store.active, tag: i)
             dockMenu.addItem(item)
         }
         dockItem.submenu = dockMenu
         menu.addItem(dockItem)
+
         menu.addItem(.separator())
+        menu.addItem(menuItem("Pedir melhoria…", "lightbulb", self, #selector(askImprovement)))
         let quit = NSMenuItem(title: "Sair da Oficina", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
         menu.addItem(quit)
         return menu
+    }
+
+    @objc private func noop() {}
+
+    @objc private func goTo(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        if id == "casa" {
+            Task { _ = await core.callPresence(force: true) }
+        } else {
+            Task { _ = await core.movePresence(to: id, text: "Oi! Cheguei.") }
+        }
     }
 
     private func showMenu(_ event: NSEvent) {

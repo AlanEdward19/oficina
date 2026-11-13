@@ -491,13 +491,16 @@ final class Core: ObservableObject {
         await factoryPost("presence/move", ["to": to, "text": text])
     }
 
-    func startPairing() async -> PairingData? {
-        let data = await post("bodies/pairing")
-        return data.flatMap { try? JSONDecoder().decode(PairingData.self, from: $0) }
-    }
-
     func setDeviceNetwork(_ on: Bool) async -> String? {
         await factoryPost("bodies/network", ["on": on])
+    }
+
+    func setAutoAccept(_ on: Bool) async -> String? {
+        await factoryPost("bodies/auto", ["on": on])
+    }
+
+    func renameDevice(_ id: String, name: String, room: String) async -> String? {
+        await factoryPost("bodies/\(id)", ["name": name, "room": room])
     }
 
     func forgetDevice(_ id: String) async {

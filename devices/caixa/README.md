@@ -3,8 +3,8 @@
 Um corpo para a Faísca em outro cômodo. Existe uma Faísca só: quando ela vem para cá, o anel acende na cor dela,
 a caixa fala e ouve a resposta; quando ela volta para o Mac, apaga. O botão chama a Faísca para cá.
 
-A voz é feita no Mac: o app sintetiza a fala (WAV 16 kHz) e transcreve o que a caixa gravou, sem internet. A
-caixa só toca, grava e conversa com o core pela porta dos dispositivos, com um token só dela.
+Não tem pareamento nem código. A caixa acha o Mac na rede sozinha, se apresenta e a Faísca avisa: "Nova caixa na
+rede". A voz é feita no Mac: o app sintetiza a fala (WAV 16 kHz) e transcreve o que a caixa gravou, sem internet.
 
 ## Peças
 
@@ -30,13 +30,17 @@ caixa só toca, grava e conversa com o core pela porta dos dispositivos, com um 
 
 O microfone já está na placa Sense (GPIO41/42). D8–D10 também vão para o cartão SD da Sense, que a caixa não usa.
 
-## Montar e gravar
+## Montar e ligar
 
-1. No Mac, abra **Dispositivos…** no menu da Faísca e toque em **Parear caixa de som**. Anote o código e a porta.
-2. Copie `include/config.h.example` para `include/config.h` e preencha o Wi-Fi, o IP do Mac, a porta e o código.
-3. Grave: `pio run -t upload` (o PlatformIO vem com o ambiente da Oficina de hardware, ou `pip install platformio`).
-4. No primeiro boot ela troca o código por um token e aparece em Dispositivos. O código vale 10 minutos e uma vez;
-   se vencer, gere outro e grave de novo.
+1. Grave uma vez: `pio run -t upload` (o PlatformIO vem com o ambiente da Oficina de hardware, ou `pip install platformio`).
+   Não há nada para configurar no código.
+2. Ligue a caixa. No primeiro uso o anel fica azul e ela abre a rede **Faísca-Caixa**. Entre pelo celular, escolha o
+   seu Wi-Fi e digite o cômodo.
+3. Ela procura a Oficina na rede (broadcast UDP `oficina?`, respondido pelo core na porta 7879), se apresenta com o
+   próprio endereço MAC e recebe um token só dela. Aparece em **Dispositivos…** e a Faísca te avisa.
+4. Para mudar de Wi-Fi ou começar do zero, segure o botão por 5 segundos.
+
+Se "Aceitar dispositivos sozinha" estiver desligado em Dispositivos, a caixa fica vermelha até você ligar.
 
 ## Luzes
 
@@ -46,14 +50,15 @@ O microfone já está na placa Sense (GPIO41/42). D8–D10 também vão para o c
 | laranja | ela está aqui |
 | branca | falando (piscando: chegou um texto sem voz, com o app do Mac fechado) |
 | azul | ouvindo |
-| vermelha | sem Wi-Fi, ou precisa parear de novo |
+| azul fixa no começo | rede "Faísca-Caixa" aberta, esperando o Wi-Fi |
+| vermelha | sem Wi-Fi, sem achar a Oficina, ou aceite automático desligado |
 
 ## Sem hardware
 
 O simulador faz o papel da caixa no terminal, com o mesmo protocolo:
 
 ```bash
-python3 devices/caixa/simulador.py --codigo 123456 --comodo Sala
+python3 devices/caixa/simulador.py --comodo Sala
 ```
 
 O que você digita é o que alguém na sala disse; `/chamar` aperta o botão; `--tocar` toca as falas.

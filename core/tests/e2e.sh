@@ -18,7 +18,7 @@ equal() { [[ "$3" == "$2" ]] && ok "$1" || bad "$1" "$3"; }
 up() { for _ in $(seq 1 100); do curl -s -m1 -o /dev/null "http://127.0.0.1:$1/v1/health" && return; sleep 0.05; done; }
 
 mkdir -p "$tmp/a" "$tmp/b"
-OFICINA_HOME="$tmp/b" OFICINA_LISTEN=127.0.0.1:7902 "$bin" 2>/dev/null & pb=$!
+OFICINA_HOME="$tmp/b" OFICINA_LISTEN=127.0.0.1:7902 OFICINA_BODY_LISTEN=127.0.0.1:7913 "$bin" 2>/dev/null & pb=$!
 up 7902
 tb=$(cat "$tmp/b/token")
 cat > "$tmp/a/config.json" <<EOF
@@ -26,7 +26,7 @@ cat > "$tmp/a/config.json" <<EOF
  "machines":[{"name":"morta","url":"http://127.0.0.1:7999","token":"x"},
              {"name":"oficina-b","url":"http://127.0.0.1:7902","token":"$tb"}]}
 EOF
-OFICINA_HOME="$tmp/a" OFICINA_BODY_LISTEN=127.0.0.1:7903 OFICINA_VOICE_WAIT_MS=0 "$bin" 2>/dev/null & pa=$!
+OFICINA_HOME="$tmp/a" OFICINA_BODY_LISTEN=127.0.0.1:7914 OFICINA_VOICE_WAIT_MS=0 "$bin" 2>/dev/null & pa=$!
 up 7901
 trap 'kill $pa $pb 2>/dev/null; rm -rf "$tmp"' EXIT
 ta=$(cat "$tmp/a/token")
@@ -292,43 +292,57 @@ check 'apaga o projeto' 204 "$(api -o /dev/null -w '%{http_code}' -X DELETE http
 echo 'presença única'
 pres() { api http://127.0.0.1:7901/v1/presence | py "$1"; }
 code=$(api -X POST http://127.0.0.1:7901/v1/bodies/pairing | py 'd["code"]')
-up 7903
-pair=$(curl -s -X POST -H 'content-type: application/json' -d "{\"code\":\"$code\",\"room\":\"Sala\"}" http://127.0.0.1:7903/v1/body/pair)
+up 7914
+pair=$(curl -s -X POST -H 'content-type: application/json' -d "{\"code\":\"$code\",\"room\":\"Sala\"}" http://127.0.0.1:7914/v1/body/pair)
 bt=$(echo "$pair" | py 'd["token"]'); bid=$(echo "$pair" | py 'd["id"]')
 body() { curl -s -m 30 -H "Authorization: Bearer $bt" "$@"; }
-check 'código vale uma vez' 403 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "{\"code\":\"$code\"}" http://127.0.0.1:7903/v1/body/pair)"
-check 'dispositivo sem token: 401' 401 "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7903/v1/body/next)"
-check 'token principal não vale lá' 401 "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ta" http://127.0.0.1:7903/v1/body/next)"
-check 'porta dos dispositivos não tem a API' 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ta" http://127.0.0.1:7903/v1/tasks)"
+check 'código vale uma vez' 403 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "{\"code\":\"$code\"}" http://127.0.0.1:7914/v1/body/pair)"
+check 'dispositivo sem token: 401' 401 "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7914/v1/body/next)"
+check 'token principal não vale lá' 401 "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ta" http://127.0.0.1:7914/v1/body/next)"
+check 'porta dos dispositivos não tem a API' 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ta" http://127.0.0.1:7914/v1/tasks)"
 check 'dispositivo online' 'True' "$(pres '[b["online"] for b in d["bodies"]]')"
 equal 'começa em casa' 'casa' "$(pres 'd["holder"]')"
 id=$(send '{"text":"chamar-sala"}'); wait_for "$id" done >/dev/null
 check 'cérebro manda ela para a sala' 'Fui até a Sala' "$(get "$id" output)"
 equal 'uma Faísca só: está na sala' "$bid" "$(pres 'd["holder"]')"
-got=""; for _ in 1 2 3; do got="$got$(body 'http://127.0.0.1:7903/v1/body/next?wait=3')"; [[ "$got" == *listen* ]] && break; done
+got=""; for _ in 1 2 3; do got="$got$(body 'http://127.0.0.1:7914/v1/body/next?wait=3')"; [[ "$got" == *listen* ]] && break; done
 check 'chega na sala' '"arrive"' "$got"
 check 'fala lá' 'Ana, o Alan está te chamando' "$got"
 check 'e espera a resposta' '"listen"' "$got"
-check 'ouve a sala' 202 "$(body -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"text":"já vou"}' http://127.0.0.1:7903/v1/body/heard)"
-got=""; for _ in 1 2 3 4; do got="$got$(body 'http://127.0.0.1:7903/v1/body/next?wait=3')"; [[ "$got" == *"eco: já vou"* ]] && break; done
+check 'ouve a sala' 202 "$(body -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"text":"já vou"}' http://127.0.0.1:7914/v1/body/heard)"
+got=""; for _ in 1 2 3 4; do got="$got$(body 'http://127.0.0.1:7914/v1/body/next?wait=3')"; [[ "$got" == *"eco: já vou"* ]] && break; done
 check 'responde falando na sala' 'eco: já vou' "$got"
 check 'conversa viva: avisa e vem depois' 'will_come' "$(api -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:7901/v1/presence/call | py 'd["outcome"]')"
 equal 'ainda na sala' "$bid" "$(pres 'd["holder"]')"
 check 'forçar sempre traz' 'came' "$(api -X POST -H 'content-type: application/json' -d '{"force":true}' http://127.0.0.1:7901/v1/presence/call | py 'd["outcome"]')"
 equal 'voltou para casa' 'casa' "$(pres 'd["holder"]')"
-got="$(body 'http://127.0.0.1:7903/v1/body/next?wait=2')"
+got="$(body 'http://127.0.0.1:7914/v1/body/next?wait=2')"
 check 'despede e sai da sala' '"leave"' "$got"
-check 'na sala não ouve mais' 409 "$(body -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"text":"oi"}' http://127.0.0.1:7903/v1/body/heard)"
-check 'com você no Mac, o botão da caixa espera' 'ocupada' "$(body -X POST http://127.0.0.1:7903/v1/body/call | py 'd["result"]')"
+check 'na sala não ouve mais' 409 "$(body -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"text":"oi"}' http://127.0.0.1:7914/v1/body/heard)"
+check 'com você no Mac, o botão da caixa espera' 'ocupada' "$(body -X POST http://127.0.0.1:7914/v1/body/call | py 'd["result"]')"
 check 'e ela te avisa' 'Alguém na Sala está me chamando' "$(mind | py 'd["thought"]["text"]')"
-check 'áudio precisa ser WAV' 400 "$(body -o /dev/null -w '%{http_code}' -X POST --data-binary 'não é wav' http://127.0.0.1:7903/v1/body/audio)"
+check 'áudio precisa ser WAV' 400 "$(body -o /dev/null -w '%{http_code}' -X POST --data-binary 'não é wav' http://127.0.0.1:7914/v1/body/audio)"
+echo 'dispositivo sem pareamento'
+found=$(python3 -c '
+import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)
+s.sendto(b"oficina?", ("127.0.0.1", 7914)); print(s.recvfrom(64)[0].decode())')
+check 'responde à descoberta na rede' 'oficina:7914:' "$found"
+hello=$(curl -s -X POST -H 'content-type: application/json' -d '{"device":"AA:BB:CC:00:11:22","room":"Cozinha"}' http://127.0.0.1:7914/v1/body/hello)
+check 'entra sozinho' 'Caixa' "$(echo "$hello" | py 'd["name"]')"
+check 'ela avisa da caixa nova' 'Nova caixa na rede' "$(mind | py 'd["thought"]["text"]')"
+hid2=$(echo "$hello" | py 'd["id"]')
+check 'dar nome e cômodo' 'Copa' "$(api -X POST -H 'content-type: application/json' -d '{"room":"Copa"}' http://127.0.0.1:7901/v1/bodies/$hid2 | py '[b["room"] for b in d["bodies"]]')"
+again=$(curl -s -X POST -H 'content-type: application/json' -d '{"device":"AA:BB:CC:00:11:22"}' http://127.0.0.1:7914/v1/body/hello | py 'd["id"]')
+equal 'mesmo aparelho, mesmo dispositivo' "$hid2" "$again"
+api -o /dev/null -X POST -H 'content-type: application/json' -d '{"on":false}' http://127.0.0.1:7901/v1/bodies/auto
+check 'aceite desligado recusa' 403 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"device":"FF:EE:DD:CC:BB:AA"}' http://127.0.0.1:7914/v1/body/hello)"
 check 'esquecer o dispositivo' 204 "$(api -o /dev/null -w '%{http_code}' -X DELETE http://127.0.0.1:7901/v1/bodies/$bid)"
-check 'token esquecido não vale' 401 "$(body -o /dev/null -w '%{http_code}' http://127.0.0.1:7903/v1/body/next?wait=0)"
+check 'token esquecido não vale' 401 "$(body -o /dev/null -w '%{http_code}' http://127.0.0.1:7914/v1/body/next?wait=0)"
 
 echo 'persistência'
 last=$(send '{"text":"guardar"}'); wait_for "$last" done >/dev/null; sleep 1.3
 kill "$pa"; wait "$pa" 2>/dev/null
-OFICINA_HOME="$tmp/a" OFICINA_BODY_LISTEN=127.0.0.1:7903 OFICINA_VOICE_WAIT_MS=0 "$bin" 2>/dev/null & pa=$!
+OFICINA_HOME="$tmp/a" OFICINA_BODY_LISTEN=127.0.0.1:7914 OFICINA_VOICE_WAIT_MS=0 "$bin" 2>/dev/null & pa=$!
 up 7901
 check 'sobrevive a reinício' 'eco: guardar' "$(get "$last" output)"
 

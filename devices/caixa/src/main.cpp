@@ -4,8 +4,14 @@
 // fala o que o Mac sintetizou e grava a resposta para o Mac transcrever. Quando
 // ela vai embora, apaga. O botão chama a Faísca para cá.
 //
+// Sem pareamento: no primeiro boot ela abre a rede "Faísca-Caixa"; pelo celular
+// você escolhe o Wi-Fi e o cômodo. Depois ela acha a Oficina na rede (broadcast
+// UDP "oficina?") e se apresenta com o próprio endereço MAC. Segurar o botão por
+// 5 s apaga tudo e volta ao começo.
+//
 // Protocolo (porta dos dispositivos da Oficina, token próprio):
-//   POST /v1/body/pair    {code, room, name, kind}  -> {token}
+//   UDP  "oficina?"                                  -> "oficina:<porta>:<nome>"
+//   POST /v1/body/hello   {device, room, kind}      -> {token}
 //   GET  /v1/body/next?wait=4                        -> {commands: [...], here}
 //   GET  /v1/body/audio/<id>                         -> WAV 16 kHz mono
 //   POST /v1/body/audio   (WAV)                      -> o que ouviu
@@ -17,9 +23,12 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
+#include <WiFiUdp.h>
 #include <driver/i2s.h>
 
-#include "config.h"
+static const int DISCOVERY_PORT = 7879;
+static const int LED_COUNT = 12;
 
 // XIAO ESP32-S3 Sense: microfone PDM na placa de expansão.
 static const int PIN_PDM_CLK = 42;
@@ -39,6 +48,9 @@ static const i2s_port_t SPEAKER = I2S_NUM_1;
 static Preferences prefs;
 static Adafruit_NeoPixel ring(LED_COUNT, PIN_LED, NEO_GRB + NEO_KHZ800);
 static String token;
+static String host;
+static int port = DISCOVERY_PORT;
+static String room = "Sala";
 static volatile bool pressed = false;
 
 // Cores: laranja da Faísca, azul ouvindo, branco falando, vermelho problema.
@@ -55,7 +67,7 @@ static void paint(uint32_t c) {
 
 static void IRAM_ATTR onButton() { pressed = true; }
 
-static String url(const String& path) { return String("http://") + CORE_HOST + ":" + CORE_PORT + path; }
+static String url(const String& path) { return "http://" + host + ":" + String(port) + path; }
 
 static void setupMic() {
   i2s_config_t cfg = {};
@@ -96,32 +108,75 @@ static void setupSpeaker() {
   i2s_set_pin(SPEAKER, &pins);
 }
 
+/// Primeiro boot (ou depois de apagar): portal "Faísca-Caixa" para escolher o Wi-Fi e o cômodo.
 static void connectWifi() {
   if (WiFi.status() == WL_CONNECTED) return;
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  for (int i = 0; i < 60 && WiFi.status() != WL_CONNECTED; i++) {
-    paint(i % 2 ? RED : 0);
-    delay(250);
+  paint(BLUE);
+  WiFiManager wm;
+  WiFiManagerParameter roomField("comodo", "Cômodo (ex.: Sala)", room.c_str(), 40);
+  wm.addParameter(&roomField);
+  wm.setConfigPortalTimeout(300);
+  wm.setTitle("Caixa da Faísca");
+  if (!wm.autoConnect("Faísca-Caixa")) {
+    paint(RED);
+    delay(5000);
+    ESP.restart();
+  }
+  String typed = roomField.getValue();
+  typed.trim();
+  if (typed.length() && typed != room) {
+    room = typed;
+    prefs.putString("room", room);
   }
   paint(idle);
 }
 
-/// Primeiro boot: troca o código de pareamento por um token só desta caixa.
-static bool pair() {
+/// Grita "oficina?" na rede; quem responder é a Oficina (o Mac).
+static bool discover() {
+  WiFiUDP udp;
+  udp.begin(DISCOVERY_PORT + 1);
+  for (int attempt = 0; attempt < 3; attempt++) {
+    udp.beginPacket(IPAddress(255, 255, 255, 255), DISCOVERY_PORT);
+    udp.print("oficina?");
+    udp.endPacket();
+    unsigned long start = millis();
+    while (millis() - start < 1500) {
+      if (udp.parsePacket()) {
+        char buf[96] = {0};
+        udp.read(buf, sizeof buf - 1);
+        String reply(buf);
+        if (reply.startsWith("oficina:")) {
+          int next = reply.indexOf(':', 8);
+          port = reply.substring(8, next < 0 ? reply.length() : next).toInt();
+          host = udp.remoteIP().toString();
+          prefs.putString("host", host);
+          prefs.putInt("port", port);
+          Serial.printf("Oficina em %s:%d\n", host.c_str(), port);
+          udp.stop();
+          return true;
+        }
+      }
+      delay(20);
+    }
+  }
+  udp.stop();
+  return false;
+}
+
+/// Sem código: a caixa diz quem é (endereço MAC) e a Oficina aceita sozinha.
+static bool hello() {
   HTTPClient http;
-  http.begin(url("/v1/body/pair"));
+  http.begin(url("/v1/body/hello"));
   http.addHeader("Content-Type", "application/json");
   JsonDocument req;
-  req["code"] = PAIR_CODE;
-  req["room"] = ROOM;
-  req["name"] = NAME;
+  req["device"] = WiFi.macAddress();
+  req["room"] = room;
   req["kind"] = "caixa";
   String body;
   serializeJson(req, body);
   int code = http.POST(body);
   if (code != 200) {
-    Serial.printf("pareamento recusado (%d): gere outro código e grave de novo\n", code);
+    Serial.printf("a Oficina não aceitou (%d): ligue \"Aceitar dispositivos sozinha\" em Dispositivos\n", code);
     http.end();
     return false;
   }
@@ -130,8 +185,18 @@ static bool pair() {
   http.end();
   token = res["token"].as<String>();
   prefs.putString("token", token);
-  Serial.printf("pareada: %s\n", res["name"].as<const char*>());
+  Serial.printf("entrei como %s\n", res["name"].as<const char*>());
   return true;
+}
+
+/// Botão segurado por 5 s: esquece Wi-Fi, Oficina e token.
+static void factoryReset() {
+  paint(RED);
+  WiFiManager wm;
+  wm.resetSettings();
+  prefs.clear();
+  delay(1000);
+  ESP.restart();
 }
 
 /// Toca o WAV que o Mac sintetizou (16 kHz, mono, 16 bits), em estéreo para o MAX98357A.
@@ -267,15 +332,16 @@ static void poll() {
   http.addHeader("Authorization", "Bearer " + token);
   int code = http.GET();
   if (code == 401) {
-    // Esquecida na Oficina: precisa de um novo código.
+    // Esquecida na Oficina: se apresenta de novo.
     http.end();
     prefs.remove("token");
     token = "";
-    paint(RED);
     return;
   }
   if (code != 200) {
+    // A Oficina mudou de endereço ou está fechada: procura de novo.
     http.end();
+    host = "";
     delay(2000);
     return;
   }
@@ -313,18 +379,31 @@ void setup() {
   setupSpeaker();
   prefs.begin("faisca", false);
   token = prefs.getString("token", "");
+  host = prefs.getString("host", "");
+  port = prefs.getInt("port", DISCOVERY_PORT);
+  room = prefs.getString("room", room);
   connectWifi();
 }
 
 void loop() {
   connectWifi();
-  if (token.isEmpty() && !pair()) {
+  if (host.isEmpty() && !discover()) {
+    paint(RED);
+    delay(3000);
+    return;
+  }
+  if (token.isEmpty() && !hello()) {
     paint(RED);
     delay(10000);
     return;
   }
   if (pressed) {
     pressed = false;
+    unsigned long start = millis();
+    while (digitalRead(PIN_BUTTON) == LOW) {
+      if (millis() - start > 5000) factoryReset();
+      delay(20);
+    }
     call();
   }
   poll();
