@@ -334,6 +334,16 @@ hid2=$(echo "$hello" | py 'd["id"]')
 check 'dar nome e cômodo' 'Copa' "$(api -X POST -H 'content-type: application/json' -d '{"room":"Copa"}' http://127.0.0.1:7901/v1/bodies/$hid2 | py '[b["room"] for b in d["bodies"]]')"
 again=$(curl -s -X POST -H 'content-type: application/json' -d '{"device":"AA:BB:CC:00:11:22"}' http://127.0.0.1:7914/v1/body/hello | py 'd["id"]')
 equal 'mesmo aparelho, mesmo dispositivo' "$hid2" "$again"
+check 'tela do pet sem token' 200 "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7901/ui/pet.html)"
+check 'tela também na porta dos dispositivos' 'Oficina.chat' "$(curl -s http://127.0.0.1:7914/ui/chat.html)"
+check 'arquivo fora da lista: 404' 404 "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7901/ui/..%2Ftoken)"
+pc=$(curl -s -X POST -H 'content-type: application/json' -d '{"device":"pc-notebook-1","name":"NOTEBOOK","room":"NOTEBOOK","kind":"pc"}' http://127.0.0.1:7914/v1/body/hello)
+check 'notebook entra como corpo' 'Novo computador na rede: NOTEBOOK' "$(mind | py 'd["thought"]["text"]')"
+pt=$(echo "$pc" | py 'd["token"]'); pid=$(echo "$pc" | py 'd["id"]')
+api -o /dev/null -X POST -H 'content-type: application/json' -d "{\"to\":\"$pid\",\"text\":\"Oi, notebook!\"}" http://127.0.0.1:7901/v1/presence/move
+got=$(curl -s -m 10 -H "Authorization: Bearer $pt" 'http://127.0.0.1:7914/v1/body/next?wait=2')
+check 'no notebook ela fala com a própria voz (sem esperar o Mac)' '"audio":null,"kind":"say","text":"Oi, notebook!"' "$got"
+api -o /dev/null -X POST -H 'content-type: application/json' -d '{"force":true}' http://127.0.0.1:7901/v1/presence/call
 api -o /dev/null -X POST -H 'content-type: application/json' -d '{"on":false}' http://127.0.0.1:7901/v1/bodies/auto
 check 'aceite desligado recusa' 403 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"device":"FF:EE:DD:CC:BB:AA"}' http://127.0.0.1:7914/v1/body/hello)"
 check 'esquecer o dispositivo' 204 "$(api -o /dev/null -w '%{http_code}' -X DELETE http://127.0.0.1:7901/v1/bodies/$bid)"

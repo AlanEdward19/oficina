@@ -62,7 +62,7 @@ fn env_dir(root: &Path) -> PathBuf {
 }
 
 fn python(root: &Path) -> PathBuf {
-    env_dir(root).join("bin/python")
+    crate::platform::venv_bin(&env_dir(root), "python")
 }
 
 fn slug(name: &str) -> String {
@@ -218,7 +218,7 @@ fn walk(base: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
 fn setup_env(root: &Path) -> Result<(), String> {
     let env = env_dir(root);
     if !python(root).exists() {
-        let ok = Command::new("python3").arg("-m").arg("venv").arg(&env).stdin(Stdio::null()).status().map_err(|e| format!("python3 não encontrado ({e})"))?;
+        let ok = Command::new(if cfg!(windows) { "python" } else { "python3" }).arg("-m").arg("venv").arg(&env).stdin(Stdio::null()).status().map_err(|e| format!("python3 não encontrado ({e})"))?;
         if !ok.success() {
             return Err("não consegui criar o ambiente Python".into());
         }
@@ -410,7 +410,7 @@ fn kicad_cli() -> Option<PathBuf> {
 pub fn erc(root: &Path, dir: &Path) -> Result<String, String> {
     let ele = dir.join("eletrica");
     let has = |ext: &str| fs::read_dir(&ele).into_iter().flatten().flatten().any(|e| e.path().extension().is_some_and(|x| x == ext));
-    let ato = env_dir(root).join("bin/ato");
+    let ato = crate::platform::venv_bin(&env_dir(root), "ato");
     if has("ato") && ato.exists() {
         let mut cmd = Command::new(ato);
         cmd.current_dir(&ele).arg("build");
@@ -494,7 +494,7 @@ pub fn firmware(root: &Path, dir: &Path) -> Result<String, String> {
     let mut r = FirmwareReport::default();
     let mut out = String::new();
     if fw.join("platformio.ini").exists() {
-        let pio = env_dir(root).join("bin/pio");
+        let pio = crate::platform::venv_bin(&env_dir(root), "pio");
         if !pio.exists() {
             return Err("PlatformIO não está instalado: instale o ambiente de CAD na tela da Oficina de hardware.".into());
         }

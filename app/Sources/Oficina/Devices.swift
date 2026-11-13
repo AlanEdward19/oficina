@@ -232,9 +232,9 @@ struct DevicesView: View {
 
     private var places: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Caixas de som").font(.system(size: 13, weight: .semibold))
+            Text("Caixas e computadores").font(.system(size: 13, weight: .semibold))
             if (p?.bodies ?? []).isEmpty {
-                Text("Nenhuma ainda. Ligue uma caixa: ela aparece aqui sozinha.").font(.callout).foregroundStyle(.secondary)
+                Text("Nenhum ainda. Ligue uma caixa ou abra a Faísca no notebook: aparece aqui sozinho.").font(.callout).foregroundStyle(.secondary)
             }
             ForEach(p?.bodies ?? []) { b in
                 if editing == b.id {
@@ -256,7 +256,7 @@ struct DevicesView: View {
     private func row(_ b: BodyData) -> some View {
         let here = p?.holder == b.id
         return HoverRow(keepTrailing: here) {
-            Image(systemName: "hifispeaker.fill")
+            Image(systemName: b.kind == "pc" ? "laptopcomputer" : "hifispeaker.fill")
                 .font(.system(size: 15))
                 .foregroundStyle(here ? tint : b.online ? Color.primary : Bench.faint)
                 .frame(width: 22)

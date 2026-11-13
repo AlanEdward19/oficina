@@ -136,6 +136,11 @@ Para ir até um deles falar com alguém, responda SOMENTE com `@@delegar presenc
 
     /// Pede ao Mac a voz e entrega ao corpo. Sem o Mac por perto, vai só o texto.
     pub async fn speak(self: &Arc<Self>, body: &str, text: &str, listen: bool) {
+        // Um computador fala com a própria voz; só a caixa precisa do áudio pronto.
+        if self.presence.body(body).is_some_and(|b| b.kind == "pc") {
+            self.presence.say(body, text.to_string(), None, listen, now());
+            return;
+        }
         let id = clip_id();
         self.voice.pending.lock().unwrap().insert(id.clone());
         let _ = self.store.tx.send(Event::Voice { voice: VoiceJob { id: id.clone(), kind: "render".into(), text: Some(text.to_string()) } });

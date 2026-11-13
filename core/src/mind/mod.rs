@@ -225,35 +225,19 @@ pub struct Mind {
 const TEST_HOUR: usize = 12;
 
 fn local_hour(ts: u64) -> usize {
-    // SAFETY: `tm` é preenchida por localtime_r antes de ser lida.
-    unsafe {
-        let t = ts as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        tm.tm_hour.clamp(0, 23) as usize
-    }
+    crate::platform::local_time(ts).hour as usize
 }
 
 /// AAAAMMDD no fuso local.
 fn local_day(ts: u64) -> u32 {
-    // SAFETY: `tm` é preenchida por localtime_r antes de ser lida.
-    unsafe {
-        let t = ts as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        ((tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday) as u32
-    }
+    let t = crate::platform::local_time(ts);
+    t.year as u32 * 10000 + t.month * 100 + t.day
 }
 
 /// "15:30" no fuso local.
 fn local_hm(ts: u64) -> String {
-    // SAFETY: `tm` é preenchida por localtime_r antes de ser lida.
-    unsafe {
-        let t = ts as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
-    }
+    let t = crate::platform::local_time(ts);
+    format!("{:02}:{:02}", t.hour, t.minute)
 }
 
 /// O evento acontecendo agora (com folga de 10 min antes do início).

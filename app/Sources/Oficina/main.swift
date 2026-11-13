@@ -685,7 +685,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         mac.representedObject = "casa"
         goMenu.addItem(mac)
         for b in p?.bodies ?? [] {
-            let item = menuItem(b.room, "hifispeaker", self, #selector(goTo(_:)), on: p?.holder == b.id)
+            let item = menuItem(b.kind == "pc" ? b.name : b.room, b.kind == "pc" ? "laptopcomputer" : "hifispeaker", self, #selector(goTo(_:)), on: p?.holder == b.id)
             item.representedObject = b.id
             item.isEnabled = b.online
             if !b.online { item.title = "\(b.room) (desligada)" }

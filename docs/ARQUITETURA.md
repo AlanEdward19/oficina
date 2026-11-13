@@ -171,6 +171,21 @@ Roda no core, num ciclo de 500 ms (0,03% de CPU), e fica em `mind.json`.
 - **Botão da caixa:** chama a Faísca para lá, a não ser que você esteja falando com ela no Mac; aí ela te avisa.
 - Firmware e simulador em `devices/caixa/`.
 
+## Windows e Linux
+
+- O core compila nos três sistemas; o que muda fica em `core/src/platform.rs` (pasta de dados, aleatoriedade, hora local,
+  nome da máquina, grupos de processos, programas no PATH com `.exe`/`.cmd`). No Windows os dados ficam em
+  `%APPDATA%\Oficina`. Agentes na nuvem (`--cloud`) ainda não funcionam no Windows, porque precisam de terminal Unix.
+- `desktop/` é o app para Windows e Linux, em Rust (tao, wry, tray-icon): o pet numa janela transparente sempre no topo,
+  a conversa numa janela comum e o ícone na bandeja. As telas são páginas servidas pelo próprio core em `/ui/`
+  (`core/ui/`), sem segredo; o app injeta o token.
+- **Tudo pelo Wi-Fi.** Ao abrir, o app grita `oficina?` na rede. Se outra Oficina responde (o Mac), este computador vira
+  um corpo da mesma Faísca (tipo `pc`), sem pareamento: o pet só aparece quando ela vem para cá, a conversa vai para a
+  mente no Mac e as respostas são faladas com a voz do Windows. Se ninguém responde, o app liga o `oficinad` local e a
+  Faísca mora ali.
+- `scripts/build-windows.sh` gera `build/Oficina-Windows.zip` (no Windows ou por compilação cruzada com mingw-w64); o CI
+  tem um job no Windows que roda os testes do core e publica o pacote como artefato.
+
 ## Oficina de hardware
 
 - Cada projeto é uma pasta em `hardware/<id>/` com um esqueleto: `requisitos.md`, `pesquisa.md`,

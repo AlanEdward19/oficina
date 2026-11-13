@@ -86,32 +86,26 @@ pub(crate) struct RunOut {
     pub(crate) session: Option<String>,
 }
 
-/// Procura o `claude` também onde um app gráfico não enxerga pelo PATH.
-fn find_gh() -> PathBuf {
+/// Procura o `gh` também onde um app gráfico não enxerga pelo PATH.
+pub(crate) fn find_gh() -> PathBuf {
     if let Some(p) = std::env::var_os("OFICINA_GH") {
         return PathBuf::from(p);
     }
-    ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("gh"))
+    crate::platform::find_program("gh", &[PathBuf::from("/opt/homebrew/bin/gh"), PathBuf::from("/usr/local/bin/gh")])
 }
 
 fn find_claude() -> PathBuf {
     if let Some(p) = std::env::var_os("OFICINA_CLAUDE") {
         return PathBuf::from(p);
     }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    [
-        PathBuf::from("/opt/homebrew/bin/claude"),
-        PathBuf::from("/usr/local/bin/claude"),
-        home.join(".local/bin/claude"),
-        home.join(".claude/local/claude"),
-    ]
-    .into_iter()
-    .find(|p| p.exists())
-    .unwrap_or_else(|| PathBuf::from("claude"))
+    let home = crate::platform::home_dir();
+    let mut known = vec![home.join(".local/bin/claude"), home.join(".claude/local/claude")];
+    if cfg!(windows) {
+        known = vec![home.join(".local/bin/claude.exe"), home.join("AppData/Roaming/npm/claude.cmd")];
+    } else {
+        known.splice(0..0, [PathBuf::from("/opt/homebrew/bin/claude"), PathBuf::from("/usr/local/bin/claude")]);
+    }
+    crate::platform::find_program("claude", &known)
 }
 
 fn claude_projects() -> PathBuf {
@@ -120,32 +114,8 @@ fn claude_projects() -> PathBuf {
     }
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".claude"))
+        .unwrap_or_else(|| crate::platform::home_dir().join(".claude"))
         .join("projects")
-}
-
-fn hostname() -> String {
-    // O hostname do Mac muda com a rede (pode virar o IP do DHCP).
-    let named = std::process::Command::new("/usr/sbin/scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
-    if let Some(name) = named {
-        return name;
-    }
-    let mut buf = [0u8; 256];
-    // SAFETY: o buffer é válido e seu tamanho é informado à chamada.
-    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
-    let end = buf.iter().position(|b| *b == 0).unwrap_or(0);
-    let name = String::from_utf8_lossy(&buf[..end]);
-    if ok && !name.is_empty() {
-        name.trim_end_matches(".local").to_string()
-    } else {
-        "este-mac".into()
-    }
 }
 
 /// Garante que o CLI use o login da assinatura, sem herdar chave de API nem
@@ -161,7 +131,8 @@ pub(crate) fn claude_cmd(path: &PathBuf) -> Command {
             cmd.env_remove(&key);
         }
     }
-    cmd.kill_on_drop(true).process_group(0);
+    cmd.kill_on_drop(true);
+    crate::platform::own_group(&mut cmd);
     cmd
 }
 
@@ -194,13 +165,13 @@ impl Engine {
             store,
             cfg,
             paths,
-            name: hostname(),
+            name: crate::platform::hostname(),
             claude: find_claude(),
             brains: Default::default(),
             convs,
             factory,
             router,
-            clean: Cleaner::new(PathBuf::from(std::env::var_os("HOME").unwrap_or_default())),
+            clean: Cleaner::new(crate::platform::home_dir()),
             local,
             running: Default::default(),
             usage: Default::default(),
@@ -395,13 +366,13 @@ impl Engine {
         }
         let pid = self.running.lock().unwrap().get(id).copied();
         if let Some(pid) = pid {
-            signal_group(pid, libc::SIGINT);
+            crate::platform::stop_group(pid, false);
             // Quem ignorar o pedido educado não pode prender a fila.
             let (me, id) = (self.clone(), id.to_string());
             tokio::spawn(async move {
                 tokio::time::sleep(GRACE).await;
                 if me.running.lock().unwrap().get(&id) == Some(&pid) {
-                    signal_group(pid, libc::SIGKILL);
+                    crate::platform::stop_group(pid, true);
                 }
             });
         }
@@ -774,6 +745,9 @@ impl Engine {
     /// O `--cloud` só aceita rodar num terminal, então ganha um pseudo-terminal.
     /// Com o link em mãos a sessão já existe na nuvem e o processo local sai.
     pub(crate) async fn open_cloud(&self, id: &str, prompt: &str) -> Result<String, String> {
+        if cfg!(windows) {
+            return Err("Agentes na nuvem ainda não funcionam no Windows: o `--cloud` precisa de um terminal Unix. Use o Mac ou /pc.".into());
+        }
         let mut cmd = claude_cmd(&PathBuf::from("/usr/bin/script"));
         cmd.current_dir(self.paths.workspace())
             .args(["-q", "/dev/null"])
@@ -811,7 +785,7 @@ impl Engine {
         let url = tokio::time::timeout(Duration::from_secs(90), read).await;
         self.running.lock().unwrap().remove(id);
         if let Some(pid) = pid {
-            signal_group(pid, libc::SIGKILL);
+            crate::platform::stop_group(pid, true);
         }
         let text = route::clean_tty(&String::from_utf8_lossy(&raw));
         match url {
@@ -897,7 +871,7 @@ impl Engine {
         let status = status.unwrap_or(Err(std::io::ErrorKind::TimedOut.into()));
         let pid = self.running.lock().unwrap().remove(id);
         if let Some(pid) = pid {
-            signal_group(pid, libc::SIGKILL);
+            crate::platform::stop_group(pid, true);
         }
         let stderr = tokio::time::timeout(GRACE, err_task)
             .await
@@ -1127,10 +1101,6 @@ fn release_memory() {
     unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
 }
 
-fn signal_group(pid: i32, sig: i32) {
-    // SAFETY: `pid` lidera um grupo criado por nós (`process_group(0)`).
-    unsafe { libc::kill(-pid, sig) };
-}
 
 fn tail(text: &str) -> String {
     let start = text.len().saturating_sub(800);

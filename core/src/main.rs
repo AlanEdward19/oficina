@@ -8,6 +8,7 @@ mod hardware;
 mod meeting;
 mod mind;
 mod peer;
+mod platform;
 mod presence;
 mod route;
 mod router;
@@ -30,10 +31,25 @@ use futures_util::stream::{self, Stream};
 use serde::Deserialize;
 use std::{convert::Infallible, sync::Arc};
 use store::Target;
-use tokio::{
-    signal::unix::{SignalKind, signal},
-    sync::broadcast::error::RecvError,
-};
+use tokio::sync::broadcast::error::RecvError;
+
+/// Espera o pedido para encerrar: SIGTERM/SIGINT no Unix, Ctrl+C no Windows.
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("sinal");
+        let mut int = signal(SignalKind::interrupt()).expect("sinal");
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
 
 #[derive(Clone)]
 struct App {
@@ -503,6 +519,23 @@ async fn brain_reset(State(app): State<App>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+// MARK: Interface web (pet e conversa para Windows e Linux)
+
+const UI: &[(&str, &str, &str)] = &[
+    ("pet.html", "text/html; charset=utf-8", include_str!("../ui/pet.html")),
+    ("chat.html", "text/html; charset=utf-8", include_str!("../ui/chat.html")),
+    ("app.js", "text/javascript; charset=utf-8", include_str!("../ui/app.js")),
+    ("style.css", "text/css; charset=utf-8", include_str!("../ui/style.css")),
+];
+
+/// Arquivos estáticos, sem segredo nenhum: o token vem do app de desktop.
+async fn ui(Path(file): Path<String>) -> Response {
+    match UI.iter().find(|(name, _, _)| *name == file) {
+        Some((_, kind, body)) => ([(header::CONTENT_TYPE, *kind), (header::CACHE_CONTROL, "no-cache")], *body).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 // MARK: Presença (as suas rotas)
 
 async fn presence_get(State(app): State<App>) -> impl IntoResponse {
@@ -723,7 +756,8 @@ async fn body_hello(State(app): State<BodyApp>, Json(h): Json<HelloBody>) -> Res
     match result {
         Ok((b, new)) => {
             if new {
-                app.engine.mind.note(format!("Nova caixa na rede: {}, na {}.", b.name, b.room));
+                let what = if b.kind == "pc" { format!("Novo computador na rede: {}", b.name) } else { format!("Nova caixa na rede: {}, na {}", b.name, b.room) };
+                app.engine.mind.note(format!("{what}."));
             }
             app.engine.publish_presence();
             Json(serde_json::json!({"id": b.id, "token": b.token, "name": b.name, "room": b.room})).into_response()
@@ -805,6 +839,7 @@ fn body_router(engine: Arc<Engine>) -> Router {
     Router::new()
         .route("/v1/body/pair", post(body_pair))
         .route("/v1/body/hello", post(body_hello))
+        .route("/ui/{file}", get(ui))
         .merge(private)
         .layer(axum::extract::DefaultBodyLimit::max(body::MAX_AUDIO + 1024))
         .with_state(app)
@@ -939,6 +974,7 @@ async fn main() {
         .route_layer(middleware::from_fn_with_state(app.clone(), auth));
     let router = Router::new()
         .route("/v1/health", get(health))
+        .route("/ui/{file}", get(ui))
         .merge(private)
         .with_state(app);
 
@@ -947,14 +983,11 @@ async fn main() {
         .unwrap_or_else(|e| panic!("não consegui abrir {listen}: {e}"));
     eprintln!("oficinad ouvindo em {listen}");
 
-    let mut term = signal(SignalKind::terminate()).expect("sinal");
-    let mut int = signal(SignalKind::interrupt()).expect("sinal");
     tokio::select! {
         r = axum::serve(listener, router).into_future() => {
             if let Err(e) = r { eprintln!("oficinad: {e}"); }
         }
-        _ = term.recv() => {}
-        _ = int.recv() => {}
+        _ = shutdown() => {}
     }
     let _ = store.flush();
     mind_ref.flush();

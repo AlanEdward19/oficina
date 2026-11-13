@@ -1,10 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    io::{Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 /// Outra máquina da Oficina, alcançável pela rede.
 #[derive(Clone, Serialize, Deserialize)]
@@ -70,10 +65,7 @@ impl Paths {
     pub fn resolve() -> Self {
         let home = std::env::var_os("OFICINA_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").expect("HOME não definido"))
-                    .join("Library/Application Support/Oficina")
-            });
+            .unwrap_or_else(crate::platform::data_dir);
         Self { home }
     }
     pub fn state(&self) -> PathBuf {
@@ -92,7 +84,7 @@ pub fn load(paths: &Paths) -> std::io::Result<(Config, String)> {
     for dir in [paths.home.clone(), paths.workspace(), paths.brain_dir()] {
         fs::create_dir_all(&dir)?;
     }
-    fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700))?;
+    crate::platform::private_dir(&paths.home)?;
 
     let cfg_path = paths.home.join("config.json");
     let mut cfg: Config = match fs::read(&cfg_path) {
@@ -116,13 +108,7 @@ pub fn load(paths: &Paths) -> std::io::Result<(Config, String)> {
         Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => {
             let t = random_hex(32)?;
-            fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&token_path)?
-                .write_all(t.as_bytes())?;
+            crate::platform::write_private(&token_path, t.as_bytes())?;
             t
         }
     };
@@ -131,7 +117,5 @@ pub fn load(paths: &Paths) -> std::io::Result<(Config, String)> {
 
 /// Bytes aleatórios do sistema, em hexadecimal.
 pub fn random_hex(n: usize) -> std::io::Result<String> {
-    let mut raw = vec![0u8; n];
-    fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
-    Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(crate::platform::random_bytes(n)?.iter().map(|b| format!("{b:02x}")).collect())
 }
