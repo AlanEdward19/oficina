@@ -210,7 +210,9 @@ fn walk(base: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
         if path.is_dir() {
             walk(base, &path, depth + 1, out);
         } else if let Ok(rel) = path.strip_prefix(base) {
-            out.push(rel.to_string_lossy().into_owned());
+            // Sempre com "/", também no Windows: é o que a API promete.
+            let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            out.push(parts.join("/"));
         }
     }
 }
