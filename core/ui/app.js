@@ -5,6 +5,13 @@
 // O app injeta window.OFICINA = {mode, token, home}.
 "use strict";
 
+// O WebView2 (Windows) roda o script do documento mais de uma vez para a mesma
+// navegação; sem a guarda, o "const" redeclarado na segunda vez quebra tudo
+// com SyntaxError antes de qualquer coisa rodar (inclusive o Oficina.pet()/chat()
+// chamado inline logo depois deste arquivo).
+if (!window.__appBooted) {
+window.__appBooted = true;
+
 const C = window.OFICINA || { mode: "casa", token: "" };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const ipc = m => window.ipc && window.ipc.postMessage(m);
@@ -229,12 +236,16 @@ async function chatCorpo() {
 
 window.Oficina = {
   async pet() {
+    if (this.__petStarted) return;
+    this.__petStarted = true;
     Pet.wire();
     await applyLook();
     if (C.mode === "corpo") petCorpo(); else petCasa();
   },
 
   async chat() {
+    if (this.__chatStarted) return;
+    this.__chatStarted = true;
     await applyLook();
     const send = C.mode === "corpo" ? await chatCorpo() : await chatCasa();
     const input = $("input");
@@ -254,3 +265,5 @@ window.Oficina = {
   receive(_) {},
   focus() { $("input") && $("input").focus(); },
 };
+
+}

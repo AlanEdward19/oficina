@@ -38,6 +38,11 @@
   <div id="bar"></div>
 <script>
 "use strict";
+// O WebView2 roda o script do documento mais de uma vez nesta janela (document
+// created duas vezes para a mesma navegação); sem a guarda, o segundo "const"
+// redeclarado quebra tudo com SyntaxError antes mesmo do ipc("ready") sair.
+if (!window.__dockBooted) {
+window.__dockBooted = true;
 const ipc = m => window.ipc.postMessage(m);
 // Espaço acima da barra para os ícones ampliados e as dicas.
 const HEADROOM = 64;
@@ -127,5 +132,6 @@ new ResizeObserver(() => Dock.measure()).observe(bar);
 new ResizeObserver(() => Dock.measure()).observe(document.getElementById("picker"));
 document.addEventListener("keydown", e => { if (e.key === "Escape") Dock.close(); });
 ipc("ready");
+}
 </script>
 </body></html>

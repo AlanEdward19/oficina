@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tao::{
-    dpi::{LogicalPosition, LogicalSize},
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition},
     event::{Event, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Window, WindowBuilder},
@@ -196,11 +196,12 @@ fn find_faisca() -> Option<Mode> {
 
 enum UserEvent {
     Pet(String),
-    Dock(String),
+    /// Mensagem da Dock de um monitor (índice em `docks`).
+    Dock(usize, String),
     /// Ícone pronto: caminho do app e PNG em base64.
     DockIcon(String, String),
-    /// Lista de apps instalados, em JSON, para o "+" da Dock.
-    DockApps(String),
+    /// Lista de apps instalados, em JSON, para o "+" da Dock de um monitor.
+    DockApps(usize, String),
     /// Um atalho global foi apertado.
     Hotkey(u32),
     Menu(tray_icon::menu::MenuId),
@@ -233,58 +234,123 @@ fn place_pet(pet: &Window) {
     }
 }
 
-/// Área útil do monitor principal (sem a barra de tarefas), em pixels lógicos:
-/// (x, y, largura, altura). No Windows vem do próprio sistema; nos outros, a tela
-/// inteira menos uma faixa para o painel.
-fn work_area(win: &Window) -> Option<(f64, f64, f64, f64)> {
-    let m = win.primary_monitor().or_else(|| win.current_monitor())?;
-    let scale = m.scale_factor();
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::{
-            Foundation::{POINT, RECT},
-            Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint},
+/// Sem borda nem cantos arredondados: o Windows 11 aplica os dois por padrão a
+/// qualquer janela de topo, mesmo sem decoração, o que vaza por trás do pet/Dock
+/// transparentes (visível como uma moldura fina).
+#[cfg(windows)]
+fn square_corners(win: &Window) {
+    use tao::platform::windows::WindowExtWindows;
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_DONOTROUND: u32 = 1;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWA_COLOR_NONE: u32 = 0xFFFFFFFE;
+    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+    const DWMSBT_NONE: u32 = 1;
+    let hwnd = win.hwnd();
+    // SAFETY: hwnd válido (janela recém-criada); os atributos são opcionais,
+    // então ignoramos erro se a versão do Windows não os suportar.
+    unsafe {
+        let pref = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(hwnd as _, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as _, std::mem::size_of::<u32>() as u32);
+        let color = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(hwnd as _, DWMWA_BORDER_COLOR, &color as *const _ as _, std::mem::size_of::<u32>() as u32);
+        let backdrop = DWMSBT_NONE;
+        let _ = DwmSetWindowAttribute(hwnd as _, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop as *const _ as _, std::mem::size_of::<u32>() as u32);
+
+        // WS_EX_NOREDIRECTIONBITMAP (p/ o WebView2 compor de verdade, ver acima)
+        // deixa um WS_BORDER de 1px que with_decorations(false) sozinho não tira.
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
+            WS_BORDER, WS_DLGFRAME,
         };
-        // SAFETY: MONITORINFO zerada com cbSize preenchido, como a API pede.
-        unsafe {
-            let mon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-            let mut info: MONITORINFO = std::mem::zeroed();
-            info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-            if GetMonitorInfoW(mon, &mut info) != 0 {
-                let RECT { left, top, right, bottom } = info.rcWork;
-                return Some((left as f64 / scale, top as f64 / scale, (right - left) as f64 / scale, (bottom - top) as f64 / scale));
-            }
-        }
+        let style = GetWindowLongPtrW(hwnd as _, GWL_STYLE);
+        SetWindowLongPtrW(hwnd as _, GWL_STYLE, style & !(WS_BORDER | WS_DLGFRAME) as isize);
+        let _ = SetWindowPos(hwnd as _, std::ptr::null_mut(), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
-    let size = m.size().to_logical::<f64>(scale);
-    let origin = m.position().to_logical::<f64>(scale);
-    Some((origin.x, origin.y, size.width, size.height - 48.0))
 }
 
-/// A Dock fica no centro da área útil, colada embaixo, como no Mac. A página
-/// mede a barra e manda o tamanho exato: a janela nunca é maior que a barra
-/// (não rouba cliques) e fica centralizada em qualquer tela, até num ultrawide.
-fn place_dock(win: &Window, width: f64, height: f64) {
-    win.set_inner_size(LogicalSize::new(width, height));
-    if let Some((x, y, w, h)) = work_area(win) {
-        win.set_outer_position(LogicalPosition::new((x + (w - width) / 2.0).round(), (y + h - height).round()));
+/// Área de um monitor, em pixels FÍSICOS: (x, y, largura, altura). Física e
+/// não lógica de propósito — `set_outer_position` lógica usa a escala do
+/// monitor onde a janela ESTÁ agora, não a do monitor alvo; com DPIs
+/// diferentes entre monitores isso manda a janela pro lugar errado. No
+/// Windows é a tela inteira (a barra de tarefas daquele monitor fica
+/// escondida enquanto a Dock está à vista, como no Mac); no Linux, a tela
+/// inteira menos uma faixa para o painel, por conta do ambiente de desktop.
+fn monitor_area(m: &tao::monitor::MonitorHandle) -> (f64, f64, f64, f64) {
+    let size = m.size();
+    let origin = m.position();
+    let panel = if cfg!(windows) { 0.0 } else { 48.0 * m.scale_factor() };
+    (origin.x as f64, origin.y as f64, size.width as f64, size.height as f64 - panel)
+}
+
+/// Mostra ou esconde a barra de tarefas do Windows (todas, em todo monitor):
+/// como no Mac, a Dock da Faísca é a única barra na tela.
+#[cfg(windows)]
+fn set_taskbar_visible(visible: bool) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, FindWindowW, GetClassNameW, SW_HIDE, SW_SHOW, ShowWindow};
+
+    unsafe extern "system" fn hide_secondary(hwnd: HWND, _: LPARAM) -> i32 {
+        let mut buf = [0u16; 32];
+        let n = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) }.max(0) as usize;
+        if String::from_utf16_lossy(&buf[..n]) == "Shell_SecondaryTrayWnd" {
+            unsafe { ShowWindow(hwnd, SW_HIDE) };
+        }
+        1
     }
+    unsafe extern "system" fn show_secondary(hwnd: HWND, _: LPARAM) -> i32 {
+        let mut buf = [0u16; 32];
+        let n = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) }.max(0) as usize;
+        if String::from_utf16_lossy(&buf[..n]) == "Shell_SecondaryTrayWnd" {
+            unsafe { ShowWindow(hwnd, SW_SHOW) };
+        }
+        1
+    }
+
+    let class: Vec<u16> = "Shell_TrayWnd\0".encode_utf16().collect();
+    unsafe {
+        let main = FindWindowW(class.as_ptr(), std::ptr::null());
+        ShowWindow(main, if visible { SW_SHOW } else { SW_HIDE });
+        let _ = EnumWindows(Some(if visible { show_secondary } else { hide_secondary }), 0);
+    }
+}
+
+/// A Dock fica no centro da área do monitor, colada embaixo, como no Mac. A
+/// página mede a barra e manda o tamanho exato: a janela nunca é maior que a
+/// barra (não rouba cliques) e fica centralizada em qualquer tela, até num
+/// ultrawide.
+fn place_dock(win: &Window, view: &WebView, area: (f64, f64, f64, f64), scale: f64, width: f64, height: f64) {
+    win.set_inner_size(LogicalSize::new(width, height));
+    // Redimensionar a janela faz o WebView2 voltar a pintar a área nova opaca
+    // (cinza): sem reaplicar o fundo transparente, essa borda aparece de novo.
+    let _ = view.set_background_color((0, 0, 0, 0));
+    // `area` é física (ver monitor_area); width/height vêm em CSS px (lógico)
+    // da própria página, então convertemos para física com a escala do
+    // monitor ALVO antes de centralizar — `set_outer_position` lógica usa a
+    // escala do monitor onde a janela está agora, que pode ser outro.
+    let (x, y, w, h) = area;
+    let (pw, ph) = (width * scale, height * scale);
+    let px = (x + (w - pw) / 2.0).round() as i32;
+    let py = (y + h - ph).round() as i32;
+    win.set_outer_position(PhysicalPosition::new(px, py));
 }
 
 /// Onde está o mouse em relação à Dock: (na borda de baixo, na faixa da Dock;
-/// sobre a Dock). Tudo em pixels físicos, do monitor principal.
-fn dock_pointer(win: &Window) -> Option<(bool, bool)> {
+/// sobre a Dock). Tudo em pixels físicos, do monitor dela.
+fn dock_pointer(win: &Window, monitor: &tao::monitor::MonitorHandle) -> Option<(bool, bool)> {
     let c = win.cursor_position().ok()?;
     let pos = win.outer_position().ok()?;
     let size = win.outer_size();
-    let m = win.primary_monitor().or_else(|| win.current_monitor())?;
-    let scale = m.scale_factor();
-    let bottom = (m.position().y + m.size().height as i32) as f64;
+    let scale = monitor.scale_factor();
+    let (mtop, mbottom) = (monitor.position().y as f64, (monitor.position().y + monitor.size().height as i32) as f64);
     let margin = 24.0 * scale;
     let (x0, x1) = (pos.x as f64 - margin, pos.x as f64 + size.width as f64 + margin);
     let over = c.x >= x0 && c.x <= x1 && c.y >= pos.y as f64 - margin && c.y <= pos.y as f64 + size.height as f64 + margin;
-    // Encostar embaixo, mais ou menos sob a Dock, faz ela aparecer.
-    let edge = c.y >= bottom - 3.0 && c.x >= x0 - 120.0 * scale && c.x <= x1 + 120.0 * scale;
+    // Encostar embaixo, mais ou menos sob a Dock, faz ela aparecer. A faixa do
+    // fundo é estreita: com outro monitor colado embaixo, o cursor continua
+    // descendo nele, e sem limite de cima isso também contaria como "no fundo".
+    let edge = c.y >= mbottom - 3.0 && c.y <= mbottom + 8.0 && c.y > mtop && c.x >= x0 - 120.0 * scale && c.x <= x1 + 120.0 * scale;
     Some((edge, over))
 }
 
@@ -297,6 +363,19 @@ fn dock_state(d: &dock::Dock) -> String {
         "apps": apps,
     })
     .to_string()
+}
+
+/// Uma Dock por monitor: cada uma substitui a barra de tarefas do seu monitor,
+/// mas compartilham o mesmo estado (ambientes, apps, ícones).
+struct DockWin {
+    win: Window,
+    view: WebView,
+    monitor: tao::monitor::MonitorHandle,
+    size: (f64, f64),
+    shown: bool,
+    hidden: bool,
+    seen: Instant,
+    area: (f64, f64, f64, f64),
 }
 
 /// Ícones de verdade, tirados em segundo plano para a Dock abrir na hora.
@@ -331,9 +410,13 @@ fn main() {
     #[cfg(windows)]
     {
         use tao::platform::windows::WindowBuilderExtWindows;
-        pet_builder = pet_builder.with_skip_taskbar(true);
+        // DWM blur-behind (padrão do tao p/ janela transparente) não combina com a
+        // composição do WebView2: fica opaca. Com WS_EX_NOREDIRECTIONBITMAP funciona.
+        pet_builder = pet_builder.with_skip_taskbar(true).with_no_redirection_bitmap(true);
     }
     let pet = pet_builder.build(&event_loop).expect("janela do pet");
+    #[cfg(windows)]
+    square_corners(&pet);
     place_pet(&pet);
 
     let chat = WindowBuilder::new()
@@ -359,40 +442,49 @@ fn main() {
         .build(&chat)
         .expect("conversa");
 
-    // A Dock, como no Mac: ambientes, apps fixados e a casinha da Faísca.
+    // A Dock, como no Mac: ambientes, apps fixados e a casinha da Faísca. Uma
+    // por monitor, cada uma substituindo a barra de tarefas do seu monitor.
     let mut dock_data = dock::Dock::open(&data_dir());
-    let mut dock_builder = WindowBuilder::new()
-        .with_title("Dock da Faísca")
-        .with_decorations(false)
-        .with_transparent(true)
-        .with_always_on_top(true)
-        .with_resizable(false)
-        .with_inner_size(LogicalSize::new(600.0, 150.0))
-        // Aparece quando a página medir a barra, já no lugar certo.
-        .with_visible(false);
-    #[cfg(windows)]
-    {
-        use tao::platform::windows::WindowBuilderExtWindows;
-        dock_builder = dock_builder.with_skip_taskbar(true);
-    }
-    let dock_win = dock_builder.build(&event_loop).expect("janela da Dock");
     let mut dock_icons: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut dock_size = (600.0, 150.0);
-    let mut dock_shown = false;
-    let mut dock_area = work_area(&dock_win);
-    // Auto-ocultar: escondida agora? E a última vez que o mouse esteve sobre ela.
-    let mut dock_hidden = false;
-    let mut dock_seen = Instant::now();
     let mut dock_peek_until: Option<Instant> = None;
-    let p = proxy.clone();
-    let dock_view: WebView = WebViewBuilder::new()
-        .with_transparent(true)
-        .with_html(include_str!("dock.html"))
-        .with_ipc_handler(move |req| {
-            let _ = p.send_event(UserEvent::Dock(req.body().clone()));
+    let monitors: Vec<_> = event_loop.available_monitors().collect();
+    let mut docks: Vec<DockWin> = monitors
+        .into_iter()
+        .enumerate()
+        .map(|(i, monitor)| {
+            let area = monitor_area(&monitor);
+            let mut dock_builder = WindowBuilder::new()
+                .with_title("Dock da Faísca")
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_always_on_top(true)
+                .with_resizable(false)
+                .with_inner_size(LogicalSize::new(600.0, 150.0))
+                // Aparece quando a página medir a barra, já no lugar certo.
+                .with_visible(false);
+            #[cfg(windows)]
+            {
+                use tao::platform::windows::WindowBuilderExtWindows;
+                dock_builder = dock_builder.with_skip_taskbar(true).with_no_redirection_bitmap(true);
+            }
+            let win = dock_builder.build(&event_loop).expect("janela da Dock");
+            let scale = monitor.scale_factor();
+            let (pw, ph) = (600.0 * scale, 150.0 * scale);
+            win.set_outer_position(PhysicalPosition::new((area.0 + (area.2 - pw) / 2.0).round() as i32, (area.1 + area.3 - ph).round() as i32));
+            #[cfg(windows)]
+            square_corners(&win);
+            let p = proxy.clone();
+            let view: WebView = WebViewBuilder::new()
+                .with_transparent(true)
+                .with_url(format!("{}/ui/dock.html", mode.base()))
+                .with_ipc_handler(move |req| {
+                    let _ = p.send_event(UserEvent::Dock(i, req.body().clone()));
+                })
+                .build(&win)
+                .expect("Dock");
+            DockWin { win, view, monitor, size: (600.0, 150.0), shown: false, hidden: false, seen: Instant::now(), area }
         })
-        .build(&dock_win)
-        .expect("Dock");
+        .collect();
 
     let status = MenuItem::new(mode.label(), false, None);
     let show_dock = CheckMenuItem::new("Mostrar Dock", true, dock_data.visible, None);
@@ -438,36 +530,65 @@ fn main() {
         let _ = view.evaluate_script("Oficina.focus()");
     };
 
+    // Reaplica a borda/cantos ao mostrar (o Windows reseta isso quando uma
+    // janela escondida fica visível) e reposiciona no centro do monitor dela.
+    let show_dock_win = |d: &mut DockWin| {
+        d.win.set_visible(true);
+        #[cfg(windows)]
+        square_corners(&d.win);
+    };
+    let render_all = |docks: &[DockWin], data: &dock::Dock, icons: &std::collections::HashMap<String, String>| {
+        let state = dock_state(data);
+        let apps = data.current().map(|e| e.apps.clone()).unwrap_or_default();
+        for d in docks {
+            let _ = d.view.evaluate_script(&format!("Dock.render({state})"));
+            for a in &apps {
+                if let Some(url) = icons.get(&a.path) {
+                    let _ = d.view.evaluate_script(&format!("Dock.icon({}, {})", serde_json::json!(a.path), serde_json::json!(url)));
+                }
+            }
+        }
+        apps
+    };
+
     event_loop.run(move |event, _, flow| {
         // Com auto-ocultar, olha o mouse a cada 120 ms; sem ele, só confere a
-        // área útil a cada 3 s (resolução ou barra de tarefas mudaram).
-        let watching = dock_data.visible && dock_data.autohide && dock_shown;
+        // área dos monitores a cada 3 s (resolução ou barra de tarefas mudaram).
+        let watching = dock_data.visible && dock_data.autohide && docks.iter().any(|d| d.shown);
         *flow = ControlFlow::WaitUntil(Instant::now() + if watching { Duration::from_millis(120) } else { Duration::from_secs(3) });
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
-                let area = work_area(&dock_win);
-                if area != dock_area {
-                    dock_area = area;
-                    place_dock(&dock_win, dock_size.0, dock_size.1);
+                for d in &mut docks {
+                    let area = monitor_area(&d.monitor);
+                    if area != d.area {
+                        d.area = area;
+                        place_dock(&d.win, &d.view, d.area, d.monitor.scale_factor(), d.size.0, d.size.1);
+                    }
                 }
                 if watching {
                     let now = Instant::now();
                     let peeking = dock_peek_until.is_some_and(|t| now < t);
-                    let picker = dock_size.1 > 200.0;
-                    match dock_pointer(&dock_win) {
-                        Some((_, true)) => dock_seen = now,
-                        Some((at_edge, false)) if dock_hidden && at_edge => {
-                            dock_hidden = false;
-                            dock_seen = now;
-                            place_dock(&dock_win, dock_size.0, dock_size.1);
-                            dock_win.set_visible(true);
-                            let _ = dock_view.evaluate_script("Dock.appear()");
+                    for d in &mut docks {
+                        let picker = d.size.1 > 200.0;
+                        if let Some((at_edge, over)) = dock_pointer(&d.win, &d.monitor) {
+                            if over {
+                                d.seen = now;
+                            }
+                            // Escondida e o mouse ou encostou embaixo ou já está sobre a área
+                            // dela (sua margem é generosa e chega perto do fundo da tela):
+                            // os dois casos devem reaparecer, não só o primeiro que bater.
+                            if d.hidden && (at_edge || over) {
+                                d.hidden = false;
+                                d.seen = now;
+                                place_dock(&d.win, &d.view, d.area, d.monitor.scale_factor(), d.size.0, d.size.1);
+                                show_dock_win(d);
+                                let _ = d.view.evaluate_script("Dock.appear()");
+                            }
                         }
-                        _ => {}
-                    }
-                    if !dock_hidden && !peeking && !picker && now.duration_since(dock_seen) > Duration::from_millis(800) {
-                        dock_hidden = true;
-                        dock_win.set_visible(false);
+                        if !d.hidden && !peeking && !picker && now.duration_since(d.seen) > Duration::from_millis(800) {
+                            d.hidden = true;
+                            d.win.set_visible(false);
+                        }
                     }
                 }
             }
@@ -479,15 +600,18 @@ fn main() {
                         show_chat(&chat, &chat_view);
                     }
                 } else if let Some(i) = hotkey_env.get(&id).copied() {
-                    let _ = proxy.send_event(UserEvent::Dock(format!("switch:{i}")));
+                    let _ = proxy.send_event(UserEvent::Dock(0, format!("switch:{i}")));
                     // Mostra a Dock por um instante, para ver em que ambiente ficou.
                     if dock_data.visible {
                         dock_peek_until = Some(Instant::now() + Duration::from_millis(1500));
-                        dock_seen = Instant::now();
-                        if dock_hidden {
-                            dock_hidden = false;
-                            dock_win.set_visible(true);
-                            let _ = dock_view.evaluate_script("Dock.appear()");
+                        for d in &mut docks {
+                            d.seen = Instant::now();
+                            if d.hidden {
+                                d.hidden = false;
+                                place_dock(&d.win, &d.view, d.area, d.monitor.scale_factor(), d.size.0, d.size.1);
+                                show_dock_win(d);
+                                let _ = d.view.evaluate_script("Dock.appear()");
+                            }
                         }
                     }
                 }
@@ -498,9 +622,12 @@ fn main() {
                     TrayIconBuilder::new().with_menu(Box::new(m)).with_tooltip("Faísca").with_icon(tray_icon_image()).build().ok()
                 });
             }
-            // Resolução, escala ou monitor mudaram: volta para o centro.
-            Event::WindowEvent { window_id, event: WindowEvent::ScaleFactorChanged { .. }, .. } if window_id == dock_win.id() => {
-                place_dock(&dock_win, dock_size.0, dock_size.1);
+            Event::WindowEvent { window_id, event: WindowEvent::ScaleFactorChanged { .. }, .. } => {
+                // Resolução ou escala mudaram: volta a Dock daquele monitor para o centro.
+                if let Some(d) = docks.iter_mut().find(|d| d.win.id() == window_id) {
+                    d.area = monitor_area(&d.monitor);
+                    place_dock(&d.win, &d.view, d.area, d.monitor.scale_factor(), d.size.0, d.size.1);
+                }
             }
             Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } => {
                 // Fechar a conversa só esconde; a Faísca continua aqui.
@@ -523,14 +650,14 @@ fn main() {
                 }
                 _ => {}
             },
-            Event::UserEvent(UserEvent::Dock(msg)) => {
+            Event::UserEvent(UserEvent::Dock(i, msg)) => {
                 let (cmd, arg) = msg.split_once(':').unwrap_or((msg.as_str(), ""));
                 let mut changed = false;
                 match cmd {
                     "ready" => {
-                        if let Mode::Home { token } = &mode {
+                        if let (Mode::Home { token }, Some(d)) = (&mode, docks.get(i)) {
                             if let Some(c) = settings_tint(token) {
-                                let _ = dock_view.evaluate_script(&format!("Dock.tint({})", serde_json::json!(c)));
+                                let _ = d.view.evaluate_script(&format!("Dock.tint({})", serde_json::json!(c)));
                             }
                         }
                         changed = true;
@@ -553,11 +680,23 @@ fn main() {
                     "size" => {
                         let mut it = arg.split(',').filter_map(|v| v.parse::<f64>().ok());
                         if let (Some(w), Some(h)) = (it.next(), it.next()) {
-                            dock_size = (w.clamp(120.0, 4000.0), h.clamp(60.0, 900.0));
-                            place_dock(&dock_win, dock_size.0, dock_size.1);
-                            if !dock_shown {
-                                dock_shown = true;
-                                dock_win.set_visible(dock_data.visible);
+                            if let Some(d) = docks.get_mut(i) {
+                                d.size = (w.clamp(120.0, 4000.0), h.clamp(60.0, 900.0));
+                                place_dock(&d.win, &d.view, d.area, d.monitor.scale_factor(), d.size.0, d.size.1);
+                                if !d.shown {
+                                    d.shown = true;
+                                    d.seen = Instant::now();
+                                    d.win.set_visible(dock_data.visible);
+                                    #[cfg(windows)]
+                                    if dock_data.visible {
+                                        square_corners(&d.win);
+                                    }
+                                }
+                            }
+                            // Primeira Dock a aparecer: some com a barra de tarefas (de todo monitor).
+                            #[cfg(windows)]
+                            if dock_data.visible && docks.iter().filter(|d| d.shown).count() == 1 {
+                                set_taskbar_visible(false);
                             }
                         }
                     }
@@ -565,7 +704,7 @@ fn main() {
                         let p = proxy.clone();
                         std::thread::spawn(move || {
                             let list = serde_json::to_string(&dock::installed()).unwrap_or_default();
-                            let _ = p.send_event(UserEvent::DockApps(list));
+                            let _ = p.send_event(UserEvent::DockApps(i, list));
                         });
                     }
                     "faisca" => show_chat(&chat, &chat_view),
@@ -573,39 +712,49 @@ fn main() {
                 }
                 if changed {
                     dock_data.save(&data_dir());
-                    let apps = dock_data.current().map(|e| e.apps.clone()).unwrap_or_default();
-                    let _ = dock_view.evaluate_script(&format!("Dock.render({})", dock_state(&dock_data)));
+                    let apps = render_all(&docks, &dock_data, &dock_icons);
                     // Ícones já tirados vão do cache; só os novos passam pelo Shell.
-                    for a in &apps {
-                        if let Some(url) = dock_icons.get(&a.path) {
-                            let _ = dock_view.evaluate_script(&format!("Dock.icon({}, {})", serde_json::json!(a.path), serde_json::json!(url)));
-                        }
-                    }
                     load_icons(apps.into_iter().filter(|a| !dock_icons.contains_key(&a.path)).collect(), proxy.clone());
                 }
             }
             Event::UserEvent(UserEvent::DockIcon(path, b64)) => {
                 let url = format!("data:image/png;base64,{b64}");
-                let _ = dock_view.evaluate_script(&format!("Dock.icon({}, {})", serde_json::json!(path), serde_json::json!(url)));
+                for d in &docks {
+                    let _ = d.view.evaluate_script(&format!("Dock.icon({}, {})", serde_json::json!(path), serde_json::json!(url)));
+                }
                 dock_icons.insert(path, url);
             }
-            Event::UserEvent(UserEvent::DockApps(list)) => {
-                let _ = dock_view.evaluate_script(&format!("Dock.picker({list})"));
+            Event::UserEvent(UserEvent::DockApps(i, list)) => {
+                if let Some(d) = docks.get(i) {
+                    let _ = d.view.evaluate_script(&format!("Dock.picker({list})"));
+                }
             }
             Event::UserEvent(UserEvent::Menu(id)) => {
                 if id == *autohide.id() {
                     dock_data.autohide = autohide.is_checked();
-                    dock_hidden = false;
-                    dock_seen = Instant::now();
-                    dock_win.set_visible(dock_data.visible);
+                    for d in &mut docks {
+                        d.hidden = false;
+                        d.seen = Instant::now();
+                        d.win.set_visible(dock_data.visible);
+                        #[cfg(windows)]
+                        if dock_data.visible {
+                            square_corners(&d.win);
+                        }
+                    }
                     dock_data.save(&data_dir());
                 } else if id == *show_dock.id() {
                     dock_data.visible = show_dock.is_checked();
-                    dock_hidden = false;
-                    dock_win.set_visible(dock_data.visible);
-                    if dock_data.visible {
-                        place_dock(&dock_win, dock_size.0, dock_size.1);
+                    for d in &mut docks {
+                        d.hidden = false;
+                        d.win.set_visible(dock_data.visible);
+                        if dock_data.visible {
+                            place_dock(&d.win, &d.view, d.area, d.monitor.scale_factor(), d.size.0, d.size.1);
+                            #[cfg(windows)]
+                            square_corners(&d.win);
+                        }
                     }
+                    #[cfg(windows)]
+                    set_taskbar_visible(!dock_data.visible);
                     dock_data.save(&data_dir());
                 } else if id == *talk.id() {
                     show_chat(&chat, &chat_view);
@@ -618,11 +767,15 @@ fn main() {
                     }
                 } else if id == *search.id() {
                     // Recomeça: procura de novo e decide entre casa e corpo.
+                    #[cfg(windows)]
+                    set_taskbar_visible(true);
                     if let Ok(exe) = std::env::current_exe() {
                         let _ = Command::new(exe).spawn();
                     }
                     *flow = ControlFlow::Exit;
                 } else if id == *quit.id() {
+                    #[cfg(windows)]
+                    set_taskbar_visible(true);
                     let _ = &tray;
                     let _ = &pet_view;
                     *flow = ControlFlow::Exit;

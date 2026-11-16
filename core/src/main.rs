@@ -524,6 +524,7 @@ async fn brain_reset(State(app): State<App>) -> StatusCode {
 const UI: &[(&str, &str, &str)] = &[
     ("pet.html", "text/html; charset=utf-8", include_str!("../ui/pet.html")),
     ("chat.html", "text/html; charset=utf-8", include_str!("../ui/chat.html")),
+    ("dock.html", "text/html; charset=utf-8", include_str!("../ui/dock.html")),
     ("app.js", "text/javascript; charset=utf-8", include_str!("../ui/app.js")),
     ("style.css", "text/css; charset=utf-8", include_str!("../ui/style.css")),
 ];
